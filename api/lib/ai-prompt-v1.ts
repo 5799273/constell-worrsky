@@ -1,4 +1,4 @@
-import { AI_PROMPT_VERSION } from "../../src/app/services/ai-config";
+import { AI_PROMPT_VERSION } from "../../src/app/services/ai-config.js";
 
 export type AnalysisType = "common" | "T" | "F";
 

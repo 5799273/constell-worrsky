@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history";
-import { betaSourceSignature, type SourceNote } from "./lib/beta-source";
-import { decryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption";
-import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth";
+import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history.js";
+import { betaSourceSignature, type SourceNote } from "./lib/beta-source.js";
+import { decryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption.js";
+import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
 
 type Stage = "instant" | "day7" | "day14";
 const TYPES = new Set(["T", "F", "common"]);

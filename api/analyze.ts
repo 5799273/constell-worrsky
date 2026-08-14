@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AI_PROMPT_VERSION } from "../src/app/services/ai-config";
-import { buildAnalysisInstructions, type AnalysisType } from "./lib/ai-prompt-v1";
-import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history";
-import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption";
-import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth";
-import { betaSourceSignature } from "./lib/beta-source";
+import { AI_PROMPT_VERSION } from "../src/app/services/ai-config.js";
+import { buildAnalysisInstructions, type AnalysisType } from "./lib/ai-prompt-v1.js";
+import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history.js";
+import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption.js";
+import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
+import { betaSourceSignature } from "./lib/beta-source.js";
 
 type AnalyzeNote = { id: string; text: string; folderId: string; createdAt: string };
 type AnalyzeRequestBody = { folderId?: unknown; type?: unknown; characterPrompt?: unknown; characterName?: unknown };

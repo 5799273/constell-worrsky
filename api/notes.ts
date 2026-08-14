@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption";
-import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth";
+import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption.js";
+import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
 
 type NoteRow = {
   id: string;
