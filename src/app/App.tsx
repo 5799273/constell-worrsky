@@ -5,7 +5,8 @@ import { analyzeNotes, stripMarkdown } from "./services/ai";
 import { supabase } from "./services/supabase";
 import { createEncryptedNote, deleteEncryptedNotes, loadEncryptedAnalysisHistory, loadEncryptedNotes, updateAnalysisSavedState, updateEncryptedNote } from "./services/encrypted-data";
 import { loadBetaStatus, submitBetaFeedback, type BetaStatus } from "./services/beta";
-import { BetaPanel, InstantFeedback } from "./components/BetaProgram";
+import { BetaPanel } from "./components/BetaProgram";
+import { AnalysisFeedback } from "./components/AnalysisFeedback";
 
 /* ═══════════════════════════════════════════════
    CONSTANTS
@@ -860,7 +861,7 @@ function SettingsPanel({ settings, onSave, onClose }: { settings: AppSettings; o
 /* ═══════════════════════════════════════════════
    RESULT PAPER
 ═══════════════════════════════════════════════ */
-function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onSave, onEmail, instantSubmitted, onFeedback }: { record: AnalysisRecord | null; error: string | null; isLoading: boolean; activeType: AnalysisType | null; selectedFolder: ConcernFolder | null; onSave: (record: AnalysisRecord) => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void; instantSubmitted: boolean; onFeedback: (payload: Record<string, unknown>) => Promise<void> }) {
+function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onSave, onEmail }: { record: AnalysisRecord | null; error: string | null; isLoading: boolean; activeType: AnalysisType | null; selectedFolder: ConcernFolder | null; onSave: (record: AnalysisRecord) => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void }) {
   if (!activeType) return null;
   const m = ANALYSIS_META[activeType];
   return (
@@ -901,7 +902,7 @@ function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onS
                     이메일로 전송
                   </button>
                 </div>
-                <InstantFeedback record={record} submitted={instantSubmitted} onSubmit={onFeedback} />
+                <AnalysisFeedback record={record} />
                 <div style={{ marginTop: 18, textAlign: "center" }}>
                   <div style={{ height: 1, background: "linear-gradient(90deg, transparent, rgba(120,75,20,0.24), transparent)", marginBottom: 8 }} />
                   <span style={{ fontSize: 10, color: "rgba(110,65,15,0.36)", fontFamily: "Georgia, serif", letterSpacing: "0.14em" }}>✦ 별별고민 ✦</span>
@@ -1463,7 +1464,7 @@ export default function App() {
           <AnimatePresence>
             {activeAnalysis && (
               <motion.div key="result" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} style={{ marginTop: 30 }}>
-                <ResultPaper record={latestRecord} error={analysisError} isLoading={analysisLoading} activeType={activeAnalysis} selectedFolder={resultFolder} onSave={saveAnalysis} onEmail={emailAnalysis} instantSubmitted={Boolean(latestRecord && betaStatus?.feedback.some((item) => item.feedback_stage === "instant" && item.analysis_id === latestRecord.id))} onFeedback={submitFeedback} />
+                <ResultPaper record={latestRecord} error={analysisError} isLoading={analysisLoading} activeType={activeAnalysis} selectedFolder={resultFolder} onSave={saveAnalysis} onEmail={emailAnalysis} />
               </motion.div>
             )}
           </AnimatePresence>
