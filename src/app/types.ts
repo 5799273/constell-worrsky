@@ -2,10 +2,17 @@ export type AnalysisType = "common" | "T" | "F";
 export type ColorTheme = "pastel" | "neon";
 export type BackgroundTheme = "dark" | "sky";
 
+export interface ConcernFolder {
+  id: string;
+  name: string;
+  colorKey: number;
+  createdAt: string;
+}
+
 export interface NoteData {
   id: string;
   text: string;
-  category: string;
+  folderId: string;
   createdAt: string;
   updatedAt: string;
   x: number;
@@ -15,10 +22,14 @@ export interface NoteData {
 
 export interface AnalysisRecord {
   id: string;
+  folderId: string;
   type: AnalysisType;
   content: string;
   analyzedAt: string;
   noteCount: number;
+  notesSignature: string;
+  promptVersion: string;
+  isSaved: boolean;
   yearMonth: string;
   characterName?: string;
 }
@@ -26,6 +37,7 @@ export interface AnalysisRecord {
 export interface BoxData {
   id: string;
   title: string | null;
+  folders: ConcernFolder[];
   notes: NoteData[];
   analysisHistory: AnalysisRecord[];
   createdAt: string;
@@ -45,7 +57,6 @@ export type AuthState =
 export interface UserPreferences {
   colorTheme: ColorTheme;
   bgTheme: BackgroundTheme;
-  categories: string[];
   characterPrompt: string;
   characterName: string;
 }

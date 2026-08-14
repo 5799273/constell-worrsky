@@ -1,7 +1,11 @@
-import { useState, useMemo, useCallback, useRef, createContext, useContext } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef, createContext, useContext } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import type { NoteData, AnalysisType, AnalysisRecord, BoxData, UserSession, AuthState, ColorTheme, BackgroundTheme } from "./types";
-import { analyzeNotes } from "./services/ai";
+import type { NoteData, AnalysisType, AnalysisRecord, BoxData, ConcernFolder, UserSession, AuthState, ColorTheme, BackgroundTheme } from "./types";
+import { analyzeNotes, stripMarkdown } from "./services/ai";
+import { supabase } from "./services/supabase";
+import { createEncryptedNote, deleteEncryptedNotes, loadEncryptedAnalysisHistory, loadEncryptedNotes, updateAnalysisSavedState, updateEncryptedNote } from "./services/encrypted-data";
+import { loadBetaStatus, submitBetaFeedback, type BetaStatus } from "./services/beta";
+import { BetaPanel, InstantFeedback } from "./components/BetaProgram";
 
 /* ═══════════════════════════════════════════════
    CONSTANTS
@@ -12,11 +16,11 @@ const nowISO = () => new Date().toISOString();
 const currentYM = () => new Date().toISOString().slice(0, 7);
 const fmtMonth = (ym: string) => { const [y, m] = ym.split("-"); return `${y}년 ${parseInt(m)}월`; };
 
-const DEFAULT_CATEGORIES = ["#001", "#002"];
+const DEFAULT_FOLDER_NAMES = ["#001", "#002"];
 
-function nextCatName(categories: string[]): string {
+function nextFolderName(folders: ConcernFolder[]): string {
   let n = 1;
-  while (categories.includes(`#${String(n).padStart(3, "0")}`)) n++;
+  while (folders.some((folder) => folder.name === `#${String(n).padStart(3, "0")}`)) n++;
   return `#${String(n).padStart(3, "0")}`;
 }
 
@@ -50,22 +54,58 @@ function getColorByIndex(index: number, theme: ColorTheme) {
 interface AppSettings {
   colorTheme: ColorTheme;
   bgTheme: BackgroundTheme;
-  categories: string[];
   characterPrompt: string;
   characterName: string;
 }
-const SettingsCtx = createContext<AppSettings>({
+type ViewSettings = AppSettings & { folders: ConcernFolder[] };
+const SettingsCtx = createContext<ViewSettings>({
   colorTheme: "pastel",
   bgTheme: "dark",
-  categories: DEFAULT_CATEGORIES,
+  folders: [],
   characterPrompt: "",
   characterName: "",
 });
 
-function useColor(cat: string) {
-  const { colorTheme, categories } = useContext(SettingsCtx);
-  const idx = categories.indexOf(cat);
-  return getColorByIndex(idx >= 0 ? idx : categories.length, colorTheme);
+function useColor(folderId: string) {
+  const { colorTheme, folders } = useContext(SettingsCtx);
+  const folder = folders.find((item) => item.id === folderId);
+  return getColorByIndex(folder?.colorKey ?? 0, colorTheme);
+}
+
+function folderName(folderId: string, folders: ConcernFolder[]) {
+  return folders.find((folder) => folder.id === folderId)?.name ?? "알 수 없는 고민";
+}
+
+function dateInputValue(iso: string) {
+  const date = new Date(iso);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function koreanDate(iso: string) {
+  const date = new Date(iso);
+  return `${date.getFullYear()}년 ${date.getMonth() + 1}월 ${date.getDate()}일`;
+}
+
+function orderMarker(order: number) {
+  const markers = ["", "①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮", "⑯", "⑰", "⑱", "⑲", "⑳"];
+  return markers[order] ?? `${order}번째`;
+}
+
+function replaceDateKeepingTime(iso: string, dateValue: string) {
+  const [year, month, day] = dateValue.split("-").map(Number);
+  const date = new Date(iso);
+  date.setFullYear(year, month - 1, day);
+  return date.toISOString();
+}
+
+function sortNotesByDisplayOrder(notes: NoteData[]) {
+  return [...notes].sort((a, b) => {
+    const dateCompare = dateInputValue(b.createdAt).localeCompare(dateInputValue(a.createdAt));
+    return dateCompare !== 0 ? dateCompare : a.createdAt.localeCompare(b.createdAt);
+  });
 }
 
 /* ─── Background theme config ─── */
@@ -136,7 +176,7 @@ const BG = {
   },
 } as const;
 
-type BgConfig = typeof BG["dark"];
+type BgConfig = (typeof BG)[keyof typeof BG];
 
 function useBg(): BgConfig {
   const { bgTheme } = useContext(SettingsCtx);
@@ -144,7 +184,7 @@ function useBg(): BgConfig {
 }
 
 const ANALYSIS_META = {
-  common: { label: "공통점 찾기", sub: "연결의 실마리", sq: "#8B5CF6", glow: "rgba(139,92,246,0.30)" },
+  common: { label: "패턴 찾기", sub: "기록 속 흐름", sq: "#8B5CF6", glow: "rgba(139,92,246,0.30)" },
   T:      { label: "T적 조언",    sub: "논리의 나침반", sq: "#3B82F6", glow: "rgba(59,130,246,0.30)" },
   F:      { label: "F적 조언",    sub: "공감의 등불",   sq: "#EF4444", glow: "rgba(239,68,68,0.30)" },
 } as const;
@@ -172,7 +212,12 @@ function shakePos() {
   return { x: STAR_SZ + Math.random() * (BOX_W - STAR_SZ * 2), y: STAR_SZ + Math.random() * (BOX_H - STAR_SZ * 2), rot: (Math.random() - 0.5) * 90 };
 }
 function makeBox(): BoxData {
-  return { id: uid(), title: null, notes: [], analysisHistory: [], createdAt: nowISO(), updatedAt: nowISO() };
+  const createdAt = nowISO();
+  return {
+    id: uid(), title: null,
+    folders: DEFAULT_FOLDER_NAMES.map((name, colorKey) => ({ id: `folder_${uid()}`, name, colorKey, createdAt })),
+    notes: [], analysisHistory: [], createdAt, updatedAt: createdAt,
+  };
 }
 
 /* ═══════════════════════════════════════════════
@@ -296,11 +341,11 @@ function MugSvg({ cat, selected, noteCount, label }: { cat: string; selected: bo
 /* ═══════════════════════════════════════════════
    MUG CABINET — 고민 찻장
 ═══════════════════════════════════════════════ */
-function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, activeType, isLoading }: {
-  categories: string[];
+function MugCabinet({ folders, notes, selectedFolderId, onSelectFolder, onAnalyze, activeType, isLoading }: {
+  folders: ConcernFolder[];
   notes: NoteData[];
-  selectedCat: string | null;
-  onSelectCat: (cat: string | null) => void;
+  selectedFolderId: string | null;
+  onSelectFolder: (folderId: string | null) => void;
   onAnalyze: (t: AnalysisType) => void;
   activeType: AnalysisType | null;
   isLoading: boolean;
@@ -308,22 +353,23 @@ function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, ac
   const bg = useBg();
   const { colorTheme } = useContext(SettingsCtx);
 
-  const countByCat = useMemo(() => {
+  const countByFolder = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const n of notes) m[n.category] = (m[n.category] ?? 0) + 1;
+    for (const n of notes) m[n.folderId] = (m[n.folderId] ?? 0) + 1;
     return m;
   }, [notes]);
 
-  const selNotes = selectedCat ? notes.filter((n) => n.category === selectedCat) : notes;
-  const disabled = selNotes.length === 0;
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) ?? null;
+  const selectedNotes = selectedFolder ? notes.filter((note) => note.folderId === selectedFolder.id) : [];
+  const disabled = !selectedFolder || selectedNotes.length === 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", borderRadius: 14, overflow: "hidden", border: `1px solid ${bg.cabinetBorder}`, boxShadow: bg === BG.sky ? "0 4px 20px rgba(80,140,220,0.12)" : "0 4px 20px rgba(0,0,0,0.30)" }}>
       {/* Cabinet header */}
       <div style={{ padding: "9px 14px 8px", background: bg.cabinetBg, borderBottom: `1px solid ${bg.cabinetShelf}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <span style={{ fontSize: 9.5, letterSpacing: "0.28em", color: bg.textSecondary, textTransform: "uppercase", fontFamily: "Georgia, serif" }}>고민 찻장</span>
-        {selectedCat && (
-          <button onClick={() => onSelectCat(null)}
+        {selectedFolder && (
+          <button onClick={() => onSelectFolder(null)}
             style={{ background: "none", border: "none", color: bg.textMuted, fontSize: 10, cursor: "pointer", fontFamily: "Georgia, serif", letterSpacing: "0.05em" }}>
             전체 보기 ×
           </button>
@@ -331,29 +377,28 @@ function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, ac
       </div>
 
       {/* Horizontal scrollable mug row */}
-      <div style={{ background: bg.cabinetBg, padding: "10px 8px 4px", overflowX: categories.length > 3 ? "auto" : "hidden" }}>
-        <div style={{ display: "flex", gap: 4, width: categories.length > 3 ? `${categories.length * 83}px` : "100%", paddingBottom: 2 }}>
-          {categories.map((cat) => {
-            const isSel = selectedCat === cat;
-            const cnt = countByCat[cat] ?? 0;
-            const idx = categories.indexOf(cat);
-            const c = getColorByIndex(idx, colorTheme);
+      <div style={{ background: bg.cabinetBg, padding: "10px 8px 4px", overflowX: folders.length > 3 ? "auto" : "hidden" }}>
+        <div style={{ display: "flex", gap: 4, width: folders.length > 3 ? `${folders.length * 83}px` : "100%", paddingBottom: 2 }}>
+          {folders.map((folder) => {
+            const isSel = selectedFolderId === folder.id;
+            const cnt = countByFolder[folder.id] ?? 0;
+            const c = getColorByIndex(folder.colorKey, colorTheme);
             return (
               <motion.button
-                key={cat}
+                key={folder.id}
                 whileHover={{ y: -3, scale: 1.05 }}
                 whileTap={{ scale: 0.94 }}
-                onClick={() => onSelectCat(isSel ? null : cat)}
+                onClick={() => onSelectFolder(isSel ? null : folder.id)}
                 style={{
                   display: "flex", flexDirection: "column", alignItems: "center",
                   background: "transparent", border: "none", cursor: "pointer", padding: "2px 0",
                   borderRadius: 8, outline: "none",
                   boxShadow: isSel ? `0 0 14px ${c.glow}` : "none",
-                  flex: categories.length <= 3 ? "1 1 0" : "0 0 79px",
+                  flex: folders.length <= 3 ? "1 1 0" : "0 0 79px",
                   minWidth: 0,
                 }}
               >
-                <MugSvg cat={cat} selected={isSel} noteCount={cnt} label={cat} />
+                <MugSvg cat={folder.id} selected={isSel} noteCount={cnt} label={folder.name} />
               </motion.button>
             );
           })}
@@ -364,10 +409,10 @@ function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, ac
 
       {/* AI analysis buttons */}
       <div style={{ borderTop: `1px solid ${bg.cabinetShelf}`, padding: "10px 12px 12px", background: bg.cabinetBg }}>
-        {selectedCat && (
+        {selectedFolder && (
           <div style={{ marginBottom: 8, textAlign: "center" }}>
             <span style={{ fontSize: 9.5, color: bg.textMuted, fontFamily: "Georgia, serif", fontStyle: "italic" }}>
-              "{selectedCat}" 고민 {selNotes.length}개 분석
+              "{selectedFolder.name}" 고민 {selectedNotes.length}개 분석
             </span>
           </div>
         )}
@@ -406,7 +451,7 @@ function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, ac
         </div>
         {disabled && (
           <p style={{ margin: "8px 0 0", fontSize: 9.5, color: bg.textMuted, textAlign: "center", fontFamily: "Georgia, serif", fontStyle: "italic" }}>
-            {selectedCat ? "이 분류에 고민이 없어요" : "고민을 먼저 담아보세요"}
+            {selectedFolder ? "이 고민 폴더에 기록이 없어요" : "분석할 고민 폴더를 선택하세요"}
           </p>
         )}
       </div>
@@ -417,20 +462,37 @@ function MugCabinet({ categories, notes, selectedCat, onSelectCat, onAnalyze, ac
 /* ═══════════════════════════════════════════════
    RECENT NOTES PANEL
 ═══════════════════════════════════════════════ */
-function RecentNotes({ notes, onDelete }: {
+function RecentNotes({ notes, onDelete, onUpdateDate }: {
   notes: NoteData[];
   onDelete: (id: string) => void;
+  onUpdateDate: (id: string, dateValue: string) => void;
 }) {
   const bg = useBg();
-  const { colorTheme, categories } = useContext(SettingsCtx);
+  const { colorTheme, folders } = useContext(SettingsCtx);
+  const [editingDateId, setEditingDateId] = useState<string | null>(null);
 
-  const displayed = useMemo(() => {
-    return [...notes].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const displayed = useMemo(() => sortNotesByDisplayOrder(notes), [notes]);
+
+  const orderByNoteId = useMemo(() => {
+    const notesByDate = new Map<string, NoteData[]>();
+    for (const note of notes) {
+      const date = dateInputValue(note.createdAt);
+      const group = notesByDate.get(date) ?? [];
+      group.push(note);
+      notesByDate.set(date, group);
+    }
+
+    const result = new Map<string, { order: number; total: number }>();
+    for (const group of notesByDate.values()) {
+      group.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      group.forEach((note, index) => result.set(note.id, { order: index + 1, total: group.length }));
+    }
+    return result;
   }, [notes]);
 
-  function catColor(cat: string) {
-    const idx = categories.indexOf(cat);
-    return getColorByIndex(idx >= 0 ? idx : categories.length, colorTheme);
+  function folderColor(folderId: string) {
+    const folder = folders.find((item) => item.id === folderId);
+    return getColorByIndex(folder?.colorKey ?? 0, colorTheme);
   }
 
   return (
@@ -445,16 +507,34 @@ function RecentNotes({ notes, onDelete }: {
         ) : (
           <AnimatePresence initial={false}>
             {displayed.map((note) => {
-              const c = catColor(note.category);
-              const d = new Date(note.createdAt);
-              const dateStr = `${d.getMonth() + 1}.${d.getDate()}`;
+              const c = folderColor(note.folderId);
+              const isEditingDate = editingDateId === note.id;
+              const sameDateOrder = orderByNoteId.get(note.id);
               return (
                 <motion.div key={note.id} layout initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }}
                   style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "5px 6px", marginBottom: 4, background: `${c.bg}0d`, border: `1px solid ${c.bg}1e`, borderRadius: 7 }}>
-                  <div style={{ flexShrink: 0, paddingTop: 2 }}><LuckyStar size={12} cat={note.category} /></div>
+                  <div style={{ flexShrink: 0, paddingTop: 2 }}><LuckyStar size={12} cat={note.folderId} /></div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p style={{ margin: "0 0 1px", fontSize: 12, color: bg.textPrimary, fontFamily: "'Noto Sans KR', sans-serif", lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as any }}>{note.text}</p>
-                    <span style={{ fontSize: 9, color: bg.textMuted, fontFamily: "Georgia, serif" }}>{dateStr} · {note.category}</span>
+                    {isEditingDate ? (
+                      <input
+                        type="date"
+                        value={dateInputValue(note.createdAt)}
+                        onChange={(event) => { onUpdateDate(note.id, event.target.value); setEditingDateId(null); }}
+                        onKeyDown={(event) => { if (event.key === "Escape") setEditingDateId(null); }}
+                        aria-label="메모 날짜 수정"
+                        autoFocus
+                        style={{ padding: "1px 3px", background: bg.inputBg, border: `1px solid ${c.bg}70`, borderRadius: 4, color: bg.textPrimary, fontSize: 9, fontFamily: "Georgia, serif", outline: "none" }}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => setEditingDateId(note.id)}
+                        title="날짜 수정"
+                        style={{ padding: 0, background: "none", border: "none", color: bg.textMuted, fontSize: 9, cursor: "pointer", fontFamily: "Georgia, serif" }}
+                      >
+                        {koreanDate(note.createdAt)}{sameDateOrder && sameDateOrder.total > 1 ? ` · ${orderMarker(sameDateOrder.order)}` : ""} · {folderName(note.folderId, folders)}
+                      </button>
+                    )}
                   </div>
                   <motion.button whileHover={{ scale: 1.2, color: "rgba(220,80,80,0.85)" }} whileTap={{ scale: 0.85 }} onClick={() => onDelete(note.id)}
                     style={{ background: "none", border: "none", cursor: "pointer", color: bg.textMuted, fontSize: 13, padding: "0 2px", lineHeight: 1, flexShrink: 0 }}>×</motion.button>
@@ -472,7 +552,8 @@ function RecentNotes({ notes, onDelete }: {
    STAR POPUP
 ═══════════════════════════════════════════════ */
 function StarPopup({ note, x, y, boxW }: { note: NoteData; x: number; y: number; boxW: number }) {
-  const c = useColor(note.category);
+  const c = useColor(note.folderId);
+  const { folders } = useContext(SettingsCtx);
   const bg = useBg();
   const pw = 180, px = Math.max(4, Math.min(x - pw / 2, boxW - pw - 4));
   const above = y > 100;
@@ -483,8 +564,8 @@ function StarPopup({ note, x, y, boxW }: { note: NoteData; x: number; y: number;
       style={{ position: "absolute", left: px, width: pw, zIndex: 200, ...(above ? { bottom: BOX_H - py } : { top: py }), background: bg.popupBg, border: `1px solid ${c.bg}45`, borderRadius: 10, padding: "10px 12px", boxShadow: `0 8px 24px rgba(0,0,0,0.35)`, pointerEvents: "none" }}>
       <div style={{ position: "absolute", left: Math.min(x - px - 6, pw - 18), width: 0, height: 0, ...(above ? { bottom: -7, borderLeft: "6px solid transparent", borderRight: "6px solid transparent", borderTop: `7px solid ${c.bg}45` } : { top: -7, borderLeft: "6px solid transparent", borderRight: "6px solid transparent", borderBottom: `7px solid ${c.bg}45` }) }} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-        <LuckyStar size={12} cat={note.category} />
-        <span style={{ fontSize: 9.5, color: c.mid, fontFamily: "'Noto Sans KR', sans-serif", fontWeight: 600 }}>{note.category}</span>
+        <LuckyStar size={12} cat={note.folderId} />
+        <span style={{ fontSize: 9.5, color: c.mid, fontFamily: "'Noto Sans KR', sans-serif", fontWeight: 600 }}>{folderName(note.folderId, folders)}</span>
         <span style={{ fontSize: 9, color: bg.textMuted, fontFamily: "Georgia, serif", marginLeft: "auto" }}>{d.getMonth() + 1}.{d.getDate()}</span>
       </div>
       <p style={{ margin: 0, fontSize: 12.5, color: bg.textPrimary, fontFamily: "'Noto Sans KR', sans-serif", lineHeight: 1.6, wordBreak: "break-all" }}>{note.text}</p>
@@ -507,7 +588,7 @@ function BoxStar({ note, index, selectedId, onSelect }: { note: NoteData; index:
       onClick={(e) => { e.stopPropagation(); onSelect(isSel ? null : note.id, note.x, note.y); }}
       style={{ position: "absolute", left: 0, top: 0, zIndex: index + 1, cursor: "pointer", filter: isSel ? "brightness(1.25)" : undefined }}
     >
-      <LuckyStar cat={note.category} />
+      <LuckyStar cat={note.folderId} />
     </motion.div>
   );
 }
@@ -614,7 +695,7 @@ function PaperBoat({ yearMonth, notes }: { yearMonth: string; notes: NoteData[] 
           <span style={{ fontSize: 9, color: "rgba(120,125,160,0.72)", fontFamily: "Georgia, serif" }}>{fmtMonth(yearMonth)}</span>
         </div>
         <div style={{ position: "absolute", left: 0, right: 0, top: 14, display: "flex", justifyContent: "center", gap: 3, flexWrap: "wrap", padding: "0 18px" }}>
-          {notes.slice(0, 8).map((n, i) => <div key={n.id} style={{ transform: `rotate(${(i % 5 - 2) * 12}deg) translateY(${i % 2 * 3}px)` }}><LuckyStar size={11} cat={n.category} /></div>)}
+          {notes.slice(0, 8).map((n, i) => <div key={n.id} style={{ transform: `rotate(${(i % 5 - 2) * 12}deg) translateY(${i % 2 * 3}px)` }}><LuckyStar size={11} cat={n.folderId} /></div>)}
           {notes.length > 8 && <span style={{ fontSize: 8.5, color: "rgba(150,155,185,0.60)", alignSelf: "center", fontFamily: "Georgia, serif" }}>+{notes.length - 8}</span>}
         </div>
         {state === "popped" && <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ position: "absolute", bottom: -18, left: "50%", transform: "translateX(-50%)", fontSize: 9, color: "rgba(120,115,160,0.55)", whiteSpace: "nowrap", fontFamily: "Georgia, serif" }}>다시 눌러 확대</motion.div>}
@@ -634,7 +715,7 @@ function PaperBoat({ yearMonth, notes }: { yearMonth: string; notes: NoteData[] 
                     <motion.div key={note.id} initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: isSel ? 1.25 : 1 }}
                       style={{ position: "absolute", left: pos.x - STAR_SZ / 2, top: pos.y - STAR_SZ / 2, rotate: pos.rot, zIndex: i + 1, cursor: "pointer" }}
                       onClick={(e) => { e.stopPropagation(); setSelId(isSel ? null : note.id); }}>
-                      <LuckyStar cat={note.category} />
+                      <LuckyStar cat={note.folderId} />
                     </motion.div>
                   );
                 })}
@@ -663,62 +744,63 @@ function PaperBoat({ yearMonth, notes }: { yearMonth: string; notes: NoteData[] 
 /* ═══════════════════════════════════════════════
    CATEGORY PICKER (double-click to rename)
 ═══════════════════════════════════════════════ */
-function CategoryPicker({ categories, selected, onSelect, onAdd, onRename }: {
-  categories: string[]; selected: string;
-  onSelect: (c: string) => void;
+function CategoryPicker({ folders, selectedFolderId, onSelect, onAdd, onRename }: {
+  folders: ConcernFolder[]; selectedFolderId: string;
+  onSelect: (folderId: string) => void;
   onAdd: () => void;
-  onRename: (oldName: string, newName: string) => void;
+  onRename: (folderId: string, newName: string) => void;
 }) {
   const bg = useBg();
   const { colorTheme } = useContext(SettingsCtx);
-  const [editingCat, setEditingCat] = useState<string | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  function startEdit(cat: string) {
-    setEditingCat(cat);
-    setDraft(cat);
+  function startEdit(folder: ConcernFolder) {
+    setEditingFolderId(folder.id);
+    setDraft(folder.name);
     setTimeout(() => inputRef.current?.select(), 30);
   }
   function commitEdit() {
-    if (editingCat && draft.trim() && draft.trim() !== editingCat) {
-      onRename(editingCat, draft.trim());
+    const editingFolder = folders.find((folder) => folder.id === editingFolderId);
+    if (editingFolder && draft.trim() && draft.trim() !== editingFolder.name) {
+      onRename(editingFolder.id, draft.trim());
     }
-    setEditingCat(null);
+    setEditingFolderId(null);
   }
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 9, letterSpacing: "0.20em", color: bg.sectionLabel, textTransform: "uppercase", fontFamily: "Georgia, serif", flexShrink: 0 }}>분류</span>
-      {categories.map((cat, idx) => {
-        const c = getColorByIndex(idx, colorTheme);
-        const isSel = selected === cat;
-        const isEditing = editingCat === cat;
+      <span style={{ fontSize: 9, letterSpacing: "0.20em", color: bg.sectionLabel, textTransform: "uppercase", fontFamily: "Georgia, serif", flexShrink: 0 }}>고민 폴더</span>
+      {folders.map((folder) => {
+        const c = getColorByIndex(folder.colorKey, colorTheme);
+        const isSel = selectedFolderId === folder.id;
+        const isEditing = editingFolderId === folder.id;
         return (
-          <div key={cat} style={{ position: "relative" }}>
+          <div key={folder.id} style={{ position: "relative" }}>
             {isEditing ? (
               <input ref={inputRef} value={draft} onChange={(e) => setDraft(e.target.value)}
                 onBlur={commitEdit}
-                onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingCat(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingFolderId(null); }}
                 style={{ width: Math.max(52, draft.length * 11 + 12), padding: "2px 7px", background: bg.inputBg, border: `1.5px solid ${c.bg}70`, borderRadius: 20, color: c.mid, fontSize: 11, fontFamily: "'Noto Sans KR', sans-serif", outline: "none", fontWeight: 600 }}
                 autoFocus
               />
             ) : (
               <motion.button
                 whileHover={{ scale: 1.07 }} whileTap={{ scale: 0.92 }}
-                onClick={() => onSelect(cat)}
-                onDoubleClick={() => startEdit(cat)}
+                onClick={() => onSelect(folder.id)}
+                onDoubleClick={() => startEdit(folder)}
                 style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 5px", background: isSel ? `${c.bg}1e` : bg.btnBg, border: `1px solid ${isSel ? c.bg + "55" : bg.btnBorder}`, borderRadius: 20, cursor: "pointer", outline: "none", boxShadow: isSel ? `0 0 10px ${c.glow}` : "none", transition: "all 0.17s", userSelect: "none" }}
                 title="더블클릭으로 이름 수정"
               >
-                <LuckyStar size={11} cat={cat} />
-                <span style={{ fontSize: 11, color: isSel ? c.bg : bg.textPrimary, fontFamily: "'Noto Sans KR', sans-serif", fontWeight: isSel ? 700 : 400 }}>{cat}</span>
+                <LuckyStar size={11} cat={folder.id} />
+                <span style={{ fontSize: 11, color: isSel ? c.bg : bg.textPrimary, fontFamily: "'Noto Sans KR', sans-serif", fontWeight: isSel ? 700 : 400 }}>{folder.name}</span>
               </motion.button>
             )}
           </div>
         );
       })}
-      <motion.button whileHover={{ scale: 1.10 }} whileTap={{ scale: 0.88 }} onClick={onAdd} title="분류 추가"
+      <motion.button whileHover={{ scale: 1.10 }} whileTap={{ scale: 0.88 }} onClick={onAdd} title="고민 폴더 추가"
         style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, background: bg.btnBg, border: `1px dashed ${bg.btnBorder}`, borderRadius: "50%", cursor: "pointer", color: bg.textMuted, fontSize: 14, lineHeight: 1, padding: 0 }}>+</motion.button>
     </div>
   );
@@ -730,16 +812,11 @@ function CategoryPicker({ categories, selected, onSelect, onAdd, onRename }: {
 function SettingsPanel({ settings, onSave, onClose }: { settings: AppSettings; onSave: (s: Partial<AppSettings>) => void; onClose: () => void }) {
   const [colorTheme, setColorTheme] = useState(settings.colorTheme);
   const [bgTheme, setBgTheme] = useState(settings.bgTheme);
-  const [categories, setCategories] = useState(settings.categories);
-  const [newCat, setNewCat] = useState("");
   const [characterPrompt, setCharacterPrompt] = useState(settings.characterPrompt);
   const [characterName, setCharacterName] = useState(settings.characterName);
   const bg = BG[bgTheme];
 
-  function addCat() { const t = newCat.trim(); if (t && !categories.includes(t) && categories.length < 12) { setCategories([...categories, t]); setNewCat(""); } }
-  function removeCat(c: string) { if (categories.length > 1) setCategories(categories.filter((x) => x !== c)); }
-  function autoAdd() { if (categories.length >= 12) return; const n = nextCatName(categories); setCategories([...categories, n]); }
-  function save() { onSave({ colorTheme, bgTheme, categories, characterPrompt, characterName }); onClose(); }
+  function save() { onSave({ colorTheme, bgTheme, characterPrompt, characterName }); onClose(); }
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
@@ -768,27 +845,6 @@ function SettingsPanel({ settings, onSave, onClose }: { settings: AppSettings; o
           ))}
         </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <p style={{ margin: 0, fontSize: 10, letterSpacing: "0.20em", color: bg.sectionLabel, textTransform: "uppercase", fontFamily: "Georgia, serif" }}>고민 분류</p>
-          <button onClick={autoAdd} style={{ background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 8, color: bg.accentBtnText, fontSize: 10.5, cursor: "pointer", padding: "3px 10px", fontFamily: "Georgia, serif" }}>+ 자동 추가</button>
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-          {categories.map((cat, idx) => {
-            const c = getColorByIndex(idx, colorTheme);
-            return (
-              <div key={cat} style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 8px 3px 6px", background: `${c.bg}18`, border: `1px solid ${c.bg}35`, borderRadius: 12 }}>
-                <span style={{ fontSize: 11, color: c.mid, fontFamily: "'Noto Sans KR', sans-serif" }}>{cat}</span>
-                {categories.length > 1 && <button onClick={() => removeCat(cat)} style={{ background: "none", border: "none", color: bg.textMuted, cursor: "pointer", fontSize: 11, padding: 0, lineHeight: 1 }}>×</button>}
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-          <input value={newCat} onChange={(e) => setNewCat(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addCat()} placeholder="새 분류 이름"
-            style={{ flex: 1, padding: "7px 10px", background: bg.inputBg, border: `1px solid ${bg.inputBorder}`, borderRadius: 7, color: bg.textPrimary, fontSize: 12.5, fontFamily: "'Noto Sans KR', sans-serif", outline: "none" }} />
-          <button onClick={addCat} style={{ padding: "7px 14px", background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 7, color: bg.accentBtnText, fontSize: 12, cursor: "pointer", fontFamily: "'Noto Sans KR', sans-serif" }}>추가</button>
-        </div>
-
         <p style={{ margin: "0 0 8px", fontSize: 10, letterSpacing: "0.20em", color: bg.sectionLabel, textTransform: "uppercase", fontFamily: "Georgia, serif" }}>AI 캐릭터 설정</p>
         <input value={characterName} onChange={(e) => setCharacterName(e.target.value)} placeholder="캐릭터 이름 (예: 토끼 친구)"
           style={{ width: "100%", boxSizing: "border-box", marginBottom: 7, padding: "8px 10px", background: bg.inputBg, border: `1px solid ${bg.inputBorder}`, borderRadius: 7, color: bg.textPrimary, fontSize: 12.5, fontFamily: "'Noto Sans KR', sans-serif", outline: "none" }} />
@@ -804,7 +860,7 @@ function SettingsPanel({ settings, onSave, onClose }: { settings: AppSettings; o
 /* ═══════════════════════════════════════════════
    RESULT PAPER
 ═══════════════════════════════════════════════ */
-function ResultPaper({ record, isLoading, activeType, selectedCat }: { record: AnalysisRecord | null; isLoading: boolean; activeType: AnalysisType | null; selectedCat: string | null }) {
+function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onSave, onEmail, instantSubmitted, onFeedback }: { record: AnalysisRecord | null; error: string | null; isLoading: boolean; activeType: AnalysisType | null; selectedFolder: ConcernFolder | null; onSave: (record: AnalysisRecord) => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void; instantSubmitted: boolean; onFeedback: (payload: Record<string, unknown>) => Promise<void> }) {
   if (!activeType) return null;
   const m = ANALYSIS_META[activeType];
   return (
@@ -816,7 +872,7 @@ function ResultPaper({ record, isLoading, activeType, selectedCat }: { record: A
         <div style={{ textAlign: "center", marginBottom: 18 }}>
           <div style={{ display: "inline-block", width: 10, height: 10, background: m.sq, borderRadius: "2px", marginBottom: 8, boxShadow: `0 0 10px ${m.sq}88`, transform: "rotate(12deg)" }} />
           <h2 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "#32180A", fontFamily: "'Noto Serif KR', Georgia, serif", letterSpacing: "0.08em" }}>
-            {selectedCat ? `"${selectedCat}" · ` : ""}{m.label}
+            {selectedFolder ? `"${selectedFolder.name}" · ` : ""}{m.label}
           </h2>
           {record?.characterName && <div style={{ marginTop: 4, fontSize: 10, color: "rgba(80,40,10,0.52)", fontFamily: "Georgia, serif", fontStyle: "italic" }}>— {record.characterName}</div>}
           <div style={{ marginTop: 8, height: 1, background: "linear-gradient(90deg, transparent, rgba(120,75,20,0.28), transparent)" }} />
@@ -827,12 +883,25 @@ function ResultPaper({ record, isLoading, activeType, selectedCat }: { record: A
               <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 2.2, ease: "linear" }} style={{ fontSize: 18, color: "rgba(120,75,20,0.45)" }}>✦</motion.div>
               <p style={{ margin: 0, fontSize: 12.5, color: "rgba(80,48,12,0.45)", fontFamily: "Georgia, serif", fontStyle: "italic" }}>고민 조각들을 읽고 있어요…</p>
             </div>
+          ) : error ? (
+            <p style={{ margin: "8px 0", fontSize: 13, color: "rgba(120,55,20,0.78)", fontFamily: "'Noto Sans KR', sans-serif", lineHeight: 1.7, textAlign: "center" }}>{error}</p>
           ) : record ? (
             <AnimatePresence mode="wait">
               <motion.div key={record.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.40 }}>
                 {record.content.split("\n\n").filter(Boolean).map((para, i, arr) => (
                   <p key={i} style={{ margin: 0, marginBottom: i < arr.length - 1 ? 14 : 0, fontSize: 13.5, color: "#2C1B07", fontFamily: "'Noto Serif KR', Georgia, serif", lineHeight: 1.88, textAlign: "justify" }}>{para.replace(/\n/g, " ")}</p>
                 ))}
+                <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 18 }}>
+                  <button onClick={() => onSave(record)} disabled={record.isSaved}
+                    style={{ padding: "7px 14px", background: record.isSaved ? "rgba(120,75,20,0.08)" : "rgba(120,75,20,0.14)", border: "1px solid rgba(120,75,20,0.24)", borderRadius: 8, color: "#5B3512", fontSize: 11, cursor: record.isSaved ? "default" : "pointer" }}>
+                    {record.isSaved ? "저장됨" : "저장하기"}
+                  </button>
+                  <button onClick={() => onEmail(record, selectedFolder)}
+                    style={{ padding: "7px 14px", background: "rgba(120,75,20,0.10)", border: "1px solid rgba(120,75,20,0.24)", borderRadius: 8, color: "#5B3512", fontSize: 11, cursor: "pointer" }}>
+                    이메일로 전송
+                  </button>
+                </div>
+                <InstantFeedback record={record} submitted={instantSubmitted} onSubmit={onFeedback} />
                 <div style={{ marginTop: 18, textAlign: "center" }}>
                   <div style={{ height: 1, background: "linear-gradient(90deg, transparent, rgba(120,75,20,0.24), transparent)", marginBottom: 8 }} />
                   <span style={{ fontSize: 10, color: "rgba(110,65,15,0.36)", fontFamily: "Georgia, serif", letterSpacing: "0.14em" }}>✦ 별별고민 ✦</span>
@@ -846,13 +915,91 @@ function ResultPaper({ record, isLoading, activeType, selectedCat }: { record: A
   );
 }
 
+function SavedAdvicePanel({ records, folders, onClose, onEmail }: { records: AnalysisRecord[]; folders: ConcernFolder[]; onClose: () => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void }) {
+  const bg = useBg();
+  const sorted = useMemo(() => [...records].sort((a, b) => b.analyzedAt.localeCompare(a.analyzedAt)), [records]);
+  const [selectedId, setSelectedId] = useState<string | null>(sorted[0]?.id ?? null);
+  const selected = sorted.find((record) => record.id === selectedId) ?? null;
+  const folderFor = (record: AnalysisRecord) => folders.find((folder) => folder.id === record.folderId) ?? null;
+  const labelFor = (type: AnalysisType) => type === "T" ? "T적 조언" : type === "F" ? "F적 조언" : "패턴 찾기";
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 110, background: bg.overlayBg, backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
+        style={{ width: "100%", maxWidth: 760, maxHeight: "82vh", overflow: "auto", background: bg.modalBg, border: `1px solid ${bg.modalBorder}`, borderRadius: 18, padding: 24, boxShadow: "0 24px 64px rgba(0,0,0,0.40)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+          <h2 style={{ margin: 0, color: bg.headingColor, fontSize: 18, fontFamily: "'Noto Serif KR', Georgia, serif" }}>저장된 조언</h2>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: bg.textSecondary, cursor: "pointer", fontSize: 18 }}>×</button>
+        </div>
+        {sorted.length === 0 ? (
+          <p style={{ margin: "30px 0", color: bg.textMuted, textAlign: "center", fontSize: 12 }}>저장된 조언이 없습니다.</p>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 0.8fr) minmax(280px, 1.4fr)", gap: 16 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {sorted.map((record) => {
+                const folder = folderFor(record);
+                return (
+                  <button key={record.id} onClick={() => setSelectedId(record.id)}
+                    style={{ textAlign: "left", padding: 12, background: selectedId === record.id ? bg.accentBtn : bg.btnBg, border: `1px solid ${selectedId === record.id ? bg.accentBtnBorder : bg.btnBorder}`, borderRadius: 10, color: bg.textPrimary, cursor: "pointer" }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>{folder?.name ?? "알 수 없는 고민"} · {labelFor(record.type)}</div>
+                    <div style={{ fontSize: 9.5, color: bg.textMuted, marginBottom: 6 }}>{new Date(record.analyzedAt).toLocaleDateString("ko-KR")}</div>
+                    <div style={{ fontSize: 10.5, color: bg.textSecondary, lineHeight: 1.45, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as any }}>{record.content}</div>
+                  </button>
+                );
+              })}
+            </div>
+            {selected && (
+              <div style={{ padding: 18, background: bg.cardBg, border: `1px solid ${bg.cardBorder}`, borderRadius: 12 }}>
+                <h3 style={{ margin: "0 0 5px", color: bg.headingColor, fontSize: 14 }}>{folderFor(selected)?.name ?? "알 수 없는 고민"} · {labelFor(selected.type)}</h3>
+                <div style={{ marginBottom: 14, fontSize: 10, color: bg.textMuted }}>{new Date(selected.analyzedAt).toLocaleDateString("ko-KR")}</div>
+                <div style={{ color: bg.textPrimary, fontSize: 12.5, lineHeight: 1.75, whiteSpace: "pre-wrap" }}>{selected.content}</div>
+                <button onClick={() => onEmail(selected, folderFor(selected))}
+                  style={{ marginTop: 16, padding: "7px 13px", background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 8, color: bg.accentBtnText, fontSize: 11, cursor: "pointer" }}>이메일로 전송</button>
+              </div>
+            )}
+          </div>
+        )}
+      </motion.div>
+    </motion.div>
+  );
+}
+
 /* ═══════════════════════════════════════════════
    LOGIN MODAL
 ═══════════════════════════════════════════════ */
 function LoginModal({ onLogin, onClose }: { onLogin: (u: UserSession) => void; onClose: () => void }) {
-  const [email, setEmail] = useState(""); const [done, setDone] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"signIn" | "signUp">("signIn");
+  const [done, setDone] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const bg = useBg();
-  function submit(e: React.FormEvent) { e.preventDefault(); if (!email.trim()) return; setDone(true); setTimeout(() => onLogin({ id: uid(), email: email.trim(), displayName: email.split("@")[0] }), 1100); }
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email.trim() || !password || isSubmitting) return;
+    setErrorMessage(null);
+    setIsSubmitting(true);
+    try {
+      if (mode === "signUp") {
+        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+        if (error) throw error;
+        if (data.session && data.user) onLogin({ id: data.user.id, email: data.user.email ?? email.trim(), displayName: data.user.email?.split("@")[0] ?? null });
+        setDone(true);
+      } else {
+        const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (error) throw error;
+        if (!data.user) throw new Error("로그인 정보를 확인하지 못했습니다.");
+        onLogin({ id: data.user.id, email: data.user.email ?? email.trim(), displayName: data.user.email?.split("@")[0] ?? null });
+        setDone(true);
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "로그인 처리 중 오류가 발생했습니다.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       style={{ position: "fixed", inset: 0, background: bg.overlayBg, backdropFilter: "blur(8px)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
@@ -861,6 +1008,7 @@ function LoginModal({ onLogin, onClose }: { onLogin: (u: UserSession) => void; o
         style={{ width: "100%", maxWidth: 340, background: bg.modalBg, border: `1px solid ${bg.modalBorder}`, borderRadius: 18, padding: "30px 26px 26px", boxShadow: "0 24px 64px rgba(0,0,0,0.40)" }}>
         {done ? (
           <div style={{ textAlign: "center", padding: "14px 0" }}>
+            {mode === "signUp" && <p style={{ margin: "0 0 12px", color: bg.textSecondary, fontSize: 12, lineHeight: 1.6 }}>가입 확인 이메일을 보냈습니다. 이메일 인증 후 로그인해 주세요.</p>}
             <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", stiffness: 200 }}
               style={{ fontSize: 38, marginBottom: 14 }}>✦</motion.div>
             <p style={{ margin: "0 0 6px", color: bg.headingColor, fontSize: 16, fontFamily: "'Noto Serif KR', Georgia, serif", fontWeight: 700 }}>반가워요!</p>
@@ -870,20 +1018,27 @@ function LoginModal({ onLogin, onClose }: { onLogin: (u: UserSession) => void; o
           <>
             <div style={{ textAlign: "center", marginBottom: 24 }}>
               <div style={{ fontSize: 28, marginBottom: 12 }}>☕</div>
-              <h2 style={{ margin: "0 0 10px", fontSize: 18, color: bg.headingColor, fontFamily: "'Noto Serif KR', Georgia, serif", fontWeight: 700 }}>저장하고 이어가세요</h2>
+              <h2 style={{ margin: "0 0 10px", fontSize: 18, color: bg.headingColor, fontFamily: "'Noto Serif KR', Georgia, serif", fontWeight: 700 }}>{mode === "signIn" ? "로그인" : "회원가입"}</h2>
               <p style={{ margin: 0, fontSize: 12, color: bg.textMuted, fontFamily: "'Noto Sans KR', sans-serif", lineHeight: 1.75 }}>
                 로그인하면 지금 담은 고민들을 잃지 않고<br />나중에 언제든 다시 꺼내볼 수 있어요.<br />
                 <span style={{ fontSize: 10.5, opacity: 0.7 }}>찻장은 항상 여기 있을게요 ✦</span>
               </p>
             </div>
             <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일 주소" required
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="이메일" required
                 style={{ padding: "11px 13px", background: bg.inputBg, border: `1px solid ${bg.inputBorder}`, borderRadius: 9, color: bg.textPrimary, fontSize: 13.5, fontFamily: "'Noto Sans KR', sans-serif", outline: "none" }} />
-              <motion.button type="submit" whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="비밀번호" minLength={6} required
+                style={{ padding: "11px 13px", background: bg.inputBg, border: `1px solid ${bg.inputBorder}`, borderRadius: 9, color: bg.textPrimary, fontSize: 13.5, fontFamily: "'Noto Sans KR', sans-serif", outline: "none" }} />
+              <motion.button type="submit" whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }} disabled={isSubmitting}
                 style={{ padding: "11px 0", background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 9, color: bg.accentBtnText, fontSize: 13.5, fontWeight: 700, fontFamily: "'Noto Sans KR', sans-serif", cursor: "pointer" }}>
-                로그인 · 회원가입
+                {mode === "signIn" ? "로그인" : "회원가입"}
               </motion.button>
+              {errorMessage && <p style={{ margin: "2px 0 0", color: "#d45a5a", fontSize: 11, lineHeight: 1.5 }}>{errorMessage}</p>}
             </form>
+            <button onClick={() => { setMode((value) => value === "signIn" ? "signUp" : "signIn"); setErrorMessage(null); }}
+              style={{ marginTop: 10, width: "100%", padding: "4px 0", background: "transparent", border: "none", color: bg.textSecondary, fontSize: 11, cursor: "pointer" }}>
+              {mode === "signIn" ? "계정이 없나요? 회원가입" : "이미 계정이 있나요? 로그인"}
+            </button>
             <button onClick={onClose} style={{ marginTop: 13, width: "100%", padding: "6px 0", background: "transparent", border: "none", color: bg.textMuted, fontSize: 11, fontFamily: "Georgia, serif", letterSpacing: "0.08em", cursor: "pointer" }}>
               괜찮아요, 나중에 할게요
             </button>
@@ -900,24 +1055,125 @@ function LoginModal({ onLogin, onClose }: { onLogin: (u: UserSession) => void; o
 export default function App() {
   const [box, setBox] = useState<BoxData>(makeBox);
   const [auth, setAuth] = useState<AuthState>({ status: "guest" });
+  const [authLoading, setAuthLoading] = useState(true);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings>({
     colorTheme: "pastel", bgTheme: "dark",
-    categories: DEFAULT_CATEGORIES,
     characterPrompt: "", characterName: "",
   });
-  const [selectedCat, setSelectedCat] = useState(DEFAULT_CATEGORIES[0]);
-  const [activeMugCat, setActiveMugCat] = useState<string | null>(null);
+  const [selectedFolderId, setSelectedFolderId] = useState(() => box.folders[0]?.id ?? "");
+  const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [shaking, setShaking] = useState(false);
   const [shakeInput, setShakeInput] = useState(false);
   const [activeAnalysis, setActiveAnalysis] = useState<AnalysisType | null>(null);
+  const [resultFolderId, setResultFolderId] = useState<string | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSavedAdvice, setShowSavedAdvice] = useState(false);
+  const [showBeta, setShowBeta] = useState(false);
+  const [betaStatus, setBetaStatus] = useState<BetaStatus | null>(null);
+  const [betaUnavailable, setBetaUnavailable] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const loadGenerationRef = useRef(0);
 
   const ym = currentYM();
   const bg = BG[settings.bgTheme];
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadUserData(userId: string, email: string | null, accessToken?: string) {
+      const generation = ++loadGenerationRef.current;
+      setAuth({ status: "authenticated", user: { id: userId, email: email ?? "", displayName: email?.split("@")[0] ?? null } });
+      setBetaUnavailable(false);
+
+      const foldersPromise = supabase.from("folders").select("id, name, color_key, created_at").order("created_at", { ascending: true });
+      const notesPromise = loadEncryptedNotes(accessToken);
+      const analysisPromise = loadEncryptedAnalysisHistory(accessToken);
+      const betaPromise = loadBetaStatus(accessToken);
+      const optionalResultsPromise = Promise.allSettled([analysisPromise, betaPromise]);
+      const [foldersSettled, notesSettled] = await Promise.allSettled([foldersPromise, notesPromise]);
+
+      if (!active || generation !== loadGenerationRef.current) return;
+      const loadErrors: string[] = [];
+      let folders: ConcernFolder[] = [];
+      let notes: NoteData[] = [];
+
+      if (foldersSettled.status === "fulfilled" && !foldersSettled.value.error) {
+        folders = (foldersSettled.value.data ?? []).map((folder) => ({ id: folder.id, name: folder.name, colorKey: folder.color_key, createdAt: folder.created_at }));
+      } else {
+        loadErrors.push("고민 폴더를 불러오지 못했습니다.");
+      }
+
+      if (notesSettled.status === "fulfilled") {
+        notes = sortNotesByDisplayOrder(notesSettled.value.notes.map((note, index) => {
+          const position = pilePos(index);
+          return { id: note.id, text: note.text, folderId: note.folder_id, createdAt: note.created_at, updatedAt: note.updated_at, x: position.x, y: position.y, rot: position.rot };
+        }));
+      } else {
+        loadErrors.push("저장된 메모를 불러오지 못했습니다. 로그인 상태와 서버 연결을 확인해주세요.");
+      }
+
+      setBox((previous) => ({ ...previous, folders, notes, analysisHistory: [], updatedAt: nowISO() }));
+      setSelectedFolderId(folders[0]?.id ?? "");
+      setActiveFolderId(null);
+      setStorageError(loadErrors.length > 0 ? loadErrors.join(" ") : null);
+
+      const [analysisSettled, betaSettled] = await optionalResultsPromise;
+      if (!active || generation !== loadGenerationRef.current) return;
+
+      if (analysisSettled.status === "fulfilled") {
+        const analysisHistory: AnalysisRecord[] = analysisSettled.value.analysisHistory.map((record) => ({
+          id: record.id, folderId: record.folder_id, type: record.type as AnalysisType,
+          content: stripMarkdown(record.content), analyzedAt: record.created_at,
+          noteCount: record.note_count ?? 0, notesSignature: record.notes_signature ?? "",
+          promptVersion: record.prompt_version ?? "", isSaved: record.is_saved,
+          yearMonth: record.created_at.slice(0, 7), characterName: record.character_name ?? undefined,
+        }));
+        setBox((previous) => ({ ...previous, analysisHistory, updatedAt: nowISO() }));
+      } else {
+        setStorageError((previous) => [previous, "저장된 조언은 현재 불러올 수 없습니다."].filter(Boolean).join(" "));
+      }
+
+      if (betaSettled.status === "fulfilled") {
+        setBetaStatus(betaSettled.value);
+      } else {
+        setBetaStatus(null);
+        setBetaUnavailable(true);
+      }
+    }
+
+    async function syncSession() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!active) return;
+      if (session?.user) await loadUserData(session.user.id, session.user.email ?? null, session.access_token);
+      else {
+        setAuth({ status: "guest" });
+        setBox(makeBox());
+      }
+      if (active) setAuthLoading(false);
+    }
+
+    void syncSession();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) void loadUserData(session.user.id, session.user.email ?? null, session.access_token);
+      else if (active) {
+        setAuth({ status: "guest" });
+        setBox(makeBox());
+        setSelectedFolderId("");
+        setActiveFolderId(null);
+        setActiveAnalysis(null);
+        setResultFolderId(null);
+        setBetaStatus(null);
+        setBetaUnavailable(false);
+      }
+    });
+
+    return () => { active = false; subscription.unsubscribe(); };
+  }, []);
 
   const notesByMonth = useMemo(() => {
     const map = new Map<string, NoteData[]>();
@@ -928,14 +1184,33 @@ export default function App() {
   const currentNotes = notesByMonth.get(ym) ?? [];
   const archivedMonths = [...notesByMonth.keys()].filter((k) => k !== ym).sort().reverse();
 
-  function updateBox(fn: (p: BoxData) => BoxData) { setBox((p) => ({ ...fn(p), updatedAt: nowISO() })); }
+  function updateBox(fn: (p: BoxData) => BoxData) {
+    setBox((previous) => {
+      const next = fn(previous);
+      return { ...next, notes: sortNotesByDisplayOrder(next.notes), updatedAt: nowISO() };
+    });
+  }
 
-  function addNote() {
+  function requireAuthenticatedUser() {
+    if (auth.status === "authenticated") return auth.user;
+    setStorageError("로그인 후 고민 기록을 저장할 수 있습니다.");
+    setShowLogin(true);
+    return null;
+  }
+
+  async function addNote() {
     if (!text.trim()) { setShakeInput(true); setTimeout(() => setShakeInput(false), 440); textareaRef.current?.focus(); return; }
-    const cat = settings.categories.includes(selectedCat) ? selectedCat : settings.categories[0];
+    const user = requireAuthenticatedUser();
+    if (!user) return;
+    const folderId = box.folders.some((folder) => folder.id === selectedFolderId) ? selectedFolderId : box.folders[0]?.id;
+    if (!folderId) return;
     const pos = pilePos(currentNotes.length);
     const now = nowISO();
-    updateBox((prev) => ({ ...prev, notes: [...prev.notes, { id: uid(), text: text.trim(), category: cat, createdAt: now, updatedAt: now, x: pos.x, y: pos.y, rot: pos.rot }] }));
+    try {
+      const { note: data } = await createEncryptedNote(folderId, text.trim(), now);
+      updateBox((prev) => ({ ...prev, notes: [...prev.notes, { id: data.id, text: data.text, folderId: data.folder_id, createdAt: data.created_at, updatedAt: data.updated_at, x: pos.x, y: pos.y, rot: pos.rot }] }));
+    } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 저장하지 못했습니다."); return; }
+    setStorageError(null);
     setText(""); textareaRef.current?.focus();
   }
 
@@ -946,45 +1221,129 @@ export default function App() {
     setTimeout(() => setShaking(false), 700);
   }, [currentNotes.length, ym]);
 
-  function deleteNote(id: string) { updateBox((prev) => ({ ...prev, notes: prev.notes.filter((n) => n.id !== id) })); }
-
-  function handleRenameCategory(oldName: string, newName: string) {
-    const trimmed = newName.trim();
-    if (!trimmed || settings.categories.includes(trimmed)) return;
-    setSettings((s) => ({ ...s, categories: s.categories.map((c) => c === oldName ? trimmed : c) }));
-    updateBox((prev) => ({ ...prev, notes: prev.notes.map((n) => n.category === oldName ? { ...n, category: trimmed } : n) }));
-    if (selectedCat === oldName) setSelectedCat(trimmed);
-    if (activeMugCat === oldName) setActiveMugCat(trimmed);
+  async function deleteNote(id: string) {
+    if (!requireAuthenticatedUser()) return;
+    try { await deleteEncryptedNotes([id]); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    updateBox((prev) => ({ ...prev, notes: prev.notes.filter((n) => n.id !== id) }));
+    setStorageError(null);
   }
 
-  function handleAddCategory() {
-    if (settings.categories.length >= 12) return;
-    const next = nextCatName(settings.categories);
-    setSettings((s) => ({ ...s, categories: [...s.categories, next] }));
+  async function deleteAllNotes() {
+    if (!requireAuthenticatedUser() || box.notes.length === 0) return;
+    const ids = box.notes.map((note) => note.id);
+    try { await deleteEncryptedNotes(ids); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    updateBox((prev) => ({ ...prev, notes: [] }));
+    setStorageError(null);
+  }
+
+  async function updateNoteDate(id: string, dateValue: string) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return;
+    if (!requireAuthenticatedUser()) return;
+    const existing = box.notes.find((note) => note.id === id);
+    if (!existing) return;
+    const createdAt = replaceDateKeepingTime(existing.createdAt, dateValue);
+    let data;
+    try { ({ note: data } = await updateEncryptedNote(id, { createdAt })); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모 날짜를 수정하지 못했습니다."); return; }
+    updateBox((prev) => ({ ...prev, notes: prev.notes.map((note) => note.id === id ? { ...note, createdAt: data.created_at, updatedAt: data.updated_at } : note) }));
+    setStorageError(null);
+  }
+
+  async function handleRenameFolder(folderId: string, newName: string) {
+    const trimmed = newName.trim();
+    if (!trimmed || box.folders.some((folder) => folder.id !== folderId && folder.name === trimmed)) return;
+    if (!requireAuthenticatedUser()) return;
+    const { data, error } = await supabase.from("folders").update({ name: trimmed }).eq("id", folderId).select("id, name").single();
+    if (error || !data) { setStorageError(error?.message ?? "폴더 이름을 수정하지 못했습니다."); return; }
+    updateBox((prev) => ({ ...prev, folders: prev.folders.map((folder) => folder.id === folderId ? { ...folder, name: data.name } : folder) }));
+    setStorageError(null);
+  }
+
+  async function handleAddFolder() {
+    if (box.folders.length >= 12) return;
+    const user = requireAuthenticatedUser();
+    if (!user) return;
+    const { data, error } = await supabase.from("folders")
+      .insert({ user_id: user.id, name: nextFolderName(box.folders), color_key: box.folders.length })
+      .select("id, name, color_key, created_at").single();
+    if (error || !data) { setStorageError(error?.message ?? "폴더를 추가하지 못했습니다."); return; }
+    const folder: ConcernFolder = { id: data.id, name: data.name, colorKey: data.color_key, createdAt: data.created_at };
+    updateBox((prev) => ({ ...prev, folders: [...prev.folders, folder] }));
+    setSelectedFolderId(folder.id);
+    setStorageError(null);
+  }
+
+  async function handleLogout() {
+    const { error } = await supabase.auth.signOut();
+    if (error) setStorageError(error.message);
   }
 
   async function handleAnalyze(type: AnalysisType) {
-    const notesToAnalyze = activeMugCat ? box.notes.filter((n) => n.category === activeMugCat) : box.notes;
+    if (!activeFolderId || auth.status !== "authenticated") return;
+    const notesToAnalyze = box.notes
+      .filter((note) => note.folderId === activeFolderId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     if (notesToAnalyze.length === 0 || analysisLoading) return;
-    setActiveAnalysis(type); setAnalysisLoading(true);
+    setActiveAnalysis(type); setResultFolderId(activeFolderId); setAnalysisError(null); setAnalysisLoading(true);
     try {
       const res = await analyzeNotes({
-        notes: notesToAnalyze.map((n) => ({ id: n.id, text: n.text, category: n.category, createdAt: n.createdAt })),
-        type, yearMonth: ym,
+        folderId: activeFolderId,
+        type,
         characterPrompt: settings.characterPrompt || undefined,
         characterName: settings.characterName || undefined,
       });
-      const record: AnalysisRecord = { id: uid(), type, content: res.content, analyzedAt: res.analyzedAt, noteCount: notesToAnalyze.length, yearMonth: ym, characterName: res.characterName };
-      updateBox((prev) => ({ ...prev, analysisHistory: [...prev.analysisHistory, record] }));
+      const record: AnalysisRecord = {
+        id: res.id,
+        folderId: res.folderId,
+        type: res.type,
+        content: stripMarkdown(res.content),
+        analyzedAt: res.analyzedAt,
+        noteCount: res.noteCount,
+        notesSignature: res.notesSignature,
+        promptVersion: res.promptVersion,
+        isSaved: res.isSaved,
+        yearMonth: res.analyzedAt.slice(0, 7),
+        characterName: res.characterName,
+      };
+      updateBox((prev) => ({ ...prev, analysisHistory: [...prev.analysisHistory.filter((item) => item.id !== record.id), record] }));
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : "AI 분석을 완료하지 못했습니다. 잠시 후 다시 시도해주세요.");
     } finally { setAnalysisLoading(false); }
   }
 
-  const latestRecord = activeAnalysis ? [...box.analysisHistory].reverse().find((r) => r.type === activeAnalysis) ?? null : null;
+  async function saveAnalysis(record: AnalysisRecord) {
+    if (record.isSaved || auth.status !== "authenticated") return;
+    try { await updateAnalysisSavedState(record.id, true); } catch { setAnalysisError("조언을 저장하지 못했습니다. 잠시 후 다시 시도해주세요."); return; }
+    updateBox((prev) => ({ ...prev, analysisHistory: prev.analysisHistory.map((item) => item.id === record.id ? { ...item, isSaved: true } : item) }));
+  }
+
+  async function submitFeedback(payload: Record<string, unknown>) {
+    await submitBetaFeedback(payload);
+    setBetaStatus(await loadBetaStatus());
+  }
+
+  function emailAnalysis(record: AnalysisRecord, folder: ConcernFolder | null) {
+    const typeLabel = record.type === "T" ? "T적 조언" : record.type === "F" ? "F적 조언" : "패턴 찾기";
+    const subject = `CONSTELL WORRSKY | ${typeLabel}`;
+    const body = [
+      `폴더 이름: ${folder?.name ?? "알 수 없는 고민"}`,
+      `분석 유형: ${typeLabel}`,
+      `분석 날짜: ${new Date(record.analyzedAt).toLocaleDateString("ko-KR")}`,
+      "",
+      record.content,
+    ].join("\n");
+    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  }
+
+  const resultFolder = box.folders.find((folder) => folder.id === resultFolderId) ?? null;
+  const latestRecord = activeAnalysis && resultFolderId
+    ? [...box.analysisHistory].reverse().find((record) => record.folderId === resultFolderId && record.type === activeAnalysis) ?? null
+    : null;
+  const savedAdvice = box.analysisHistory.filter((record) => record.isSaved);
 
   const sel = useMemo(() => {
-    const idx = settings.categories.indexOf(selectedCat);
-    return getColorByIndex(idx >= 0 ? idx : 0, settings.colorTheme);
-  }, [selectedCat, settings.categories, settings.colorTheme]);
+    const folder = box.folders.find((item) => item.id === selectedFolderId);
+    return getColorByIndex(folder?.colorKey ?? 0, settings.colorTheme);
+  }, [selectedFolderId, box.folders, settings.colorTheme]);
 
   const particles = useMemo(() => Array.from({ length: 55 }, (_, i) => ({
     left: `${(i * 137.5) % 100}%`, top: `${(i * 97.3) % 100}%`,
@@ -998,7 +1357,7 @@ export default function App() {
   const LEFT_PANEL_HEIGHT = 530;
 
   return (
-    <SettingsCtx.Provider value={settings}>
+    <SettingsCtx.Provider value={{ ...settings, folders: box.folders }}>
       <div style={{ minHeight: "100svh", background: bg.pageBg, display: "flex", flexDirection: "column", alignItems: "center", padding: "36px 20px 56px", fontFamily: "'Noto Sans KR', sans-serif", overflowX: "hidden" }}>
         {/* Particles */}
         <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 0 }}>
@@ -1017,7 +1376,12 @@ export default function App() {
             <div style={{ marginTop: 10, height: "1px", background: `linear-gradient(90deg, transparent, ${bg.dividerColor}, transparent)` }} />
             <div style={{ position: "absolute", right: 0, top: 0, display: "flex", alignItems: "center", gap: 8 }}>
               {auth.status === "authenticated" ? (
-                <span style={{ fontSize: 10.5, color: bg.textSecondary, fontFamily: "Georgia, serif" }}>{(auth as any).user.displayName}</span>
+                <>
+                  <button onClick={() => setShowSavedAdvice(true)} style={{ padding: "4px 8px", background: bg.btnBg, border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: "pointer", color: bg.textSecondary, fontSize: 10 }}>저장된 조언</button>
+                  <button onClick={() => { if (!betaUnavailable) setShowBeta(true); }} disabled={betaUnavailable} title={betaUnavailable ? "베타 현황을 불러올 수 없습니다." : undefined} style={{ padding: "4px 8px", background: bg.btnBg, border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: betaUnavailable ? "default" : "pointer", opacity: betaUnavailable ? 0.55 : 1, color: bg.textSecondary, fontSize: 10 }}>베타 {betaUnavailable ? "사용 불가" : betaStatus ? `${betaStatus.participant.day}일차` : "현황"}</button>
+                  <span style={{ fontSize: 10.5, color: bg.textSecondary, fontFamily: "Georgia, serif" }}>{auth.user.displayName}</span>
+                  <button onClick={handleLogout} style={{ padding: "4px 8px", background: "transparent", border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: "pointer", color: bg.textSecondary, fontSize: 10 }}>로그아웃</button>
+                </>
               ) : (
                 <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.94 }} onClick={() => setShowLogin(true)}
                   style={{ padding: "5px 12px", background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 14, cursor: "pointer", color: bg.accentBtnText, fontSize: 11, fontFamily: "'Noto Sans KR', sans-serif", fontWeight: 600, letterSpacing: "0.03em" }}>
@@ -1036,16 +1400,16 @@ export default function App() {
             <motion.div initial={{ opacity: 0, x: -14 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.7, delay: 0.2 }}
               style={{ width: 270, flexShrink: 0, display: "flex", flexDirection: "column", gap: 10, height: LEFT_PANEL_HEIGHT }}>
               <MugCabinet
-                categories={settings.categories}
+                folders={box.folders}
                 notes={box.notes}
-                selectedCat={activeMugCat}
-                onSelectCat={(cat) => { setActiveMugCat(cat); if (cat) setActiveAnalysis(null); }}
+                selectedFolderId={activeFolderId}
+                onSelectFolder={(folderId) => { setActiveFolderId(folderId); setAnalysisError(null); }}
                 onAnalyze={handleAnalyze}
                 activeType={activeAnalysis}
                 isLoading={analysisLoading}
               />
               {/* Recent notes — all notes, most recent first */}
-              <RecentNotes notes={box.notes} onDelete={deleteNote} />
+              <RecentNotes notes={box.notes} onDelete={deleteNote} onUpdateDate={updateNoteDate} />
             </motion.div>
 
             {/* CENTER: Star box + input */}
@@ -1056,12 +1420,12 @@ export default function App() {
               {/* Input panel */}
               <div style={{ width: BOX_W, marginTop: 8, background: bg.cardBg, border: `1px solid ${bg.cardBorder}`, borderRadius: 13, padding: "14px 15px 12px", backdropFilter: "blur(12px)" }}>
                 <div style={{ marginBottom: 11 }}>
-                  <CategoryPicker categories={settings.categories} selected={selectedCat} onSelect={setSelectedCat} onAdd={handleAddCategory} onRename={handleRenameCategory} />
+                  <CategoryPicker folders={box.folders} selectedFolderId={selectedFolderId} onSelect={setSelectedFolderId} onAdd={handleAddFolder} onRename={handleRenameFolder} />
                 </div>
                 <motion.div animate={shakeInput ? { x: [-5, 5, -4, 4, -2, 2, 0] } : {}} transition={{ duration: 0.38 }}>
                   <textarea ref={textareaRef} value={text} onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addNote(); } }}
-                    placeholder={`${selectedCat} 고민을 적어보세요…`} rows={3}
+                    placeholder={`${folderName(selectedFolderId, box.folders)} 고민을 적어보세요…`} rows={3}
                     style={{ width: "100%", boxSizing: "border-box", background: `${sel.bg}0e`, border: `1.5px solid ${sel.bg}38`, borderRadius: 9, padding: "9px 11px", color: bg.textPrimary, fontSize: 13.5, fontFamily: "'Noto Sans KR', sans-serif", resize: "none", outline: "none", lineHeight: 1.65, transition: "border-color 0.2s, background 0.2s" }}
                     onFocus={(e) => { e.target.style.borderColor = sel.bg + "78"; e.target.style.background = sel.bg + "18"; }}
                     onBlur={(e) => { e.target.style.borderColor = sel.bg + "38"; e.target.style.background = sel.bg + "0e"; }} />
@@ -1070,9 +1434,11 @@ export default function App() {
                   style={{ marginTop: 9, width: "100%", padding: "10px 0", background: `linear-gradient(135deg, ${sel.bg}e0, ${sel.bg}a0)`, border: `1.5px solid ${sel.bg}50`, borderRadius: 9, color: sel.text, fontSize: 13, fontWeight: 700, fontFamily: "'Noto Sans KR', sans-serif", cursor: "pointer", boxShadow: `0 3px 14px ${sel.glow}` }}>
                   상자에 담기
                 </motion.button>
+                {storageError && <p style={{ margin: "8px 0 0", color: "#d45a5a", fontSize: 11, lineHeight: 1.5 }}>{storageError}</p>}
+                {auth.status === "guest" && !authLoading && <p style={{ margin: "8px 0 0", color: bg.textMuted, fontSize: 10.5, textAlign: "center" }}>로그인 후 고민 기록을 저장할 수 있어요.</p>}
                 {box.notes.length > 0 && (
                   <motion.button initial={{ opacity: 0 }} animate={{ opacity: 1 }} whileHover={{ opacity: 0.72 }}
-                    onClick={() => updateBox((prev) => ({ ...prev, notes: [] }))}
+                    onClick={deleteAllNotes}
                     style={{ marginTop: 6, width: "100%", padding: "6px 0", background: "transparent", border: `1px solid ${bg.panelBorder}`, borderRadius: 7, color: bg.textMuted, fontSize: 10.5, fontFamily: "Georgia, serif", letterSpacing: "0.10em", cursor: "pointer" }}>
                     전부 꺼내기
                   </motion.button>
@@ -1097,7 +1463,7 @@ export default function App() {
           <AnimatePresence>
             {activeAnalysis && (
               <motion.div key="result" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} style={{ marginTop: 30 }}>
-                <ResultPaper record={latestRecord} isLoading={analysisLoading} activeType={activeAnalysis} selectedCat={activeMugCat} />
+                <ResultPaper record={latestRecord} error={analysisError} isLoading={analysisLoading} activeType={activeAnalysis} selectedFolder={resultFolder} onSave={saveAnalysis} onEmail={emailAnalysis} instantSubmitted={Boolean(latestRecord && betaStatus?.feedback.some((item) => item.feedback_stage === "instant" && item.analysis_id === latestRecord.id))} onFeedback={submitFeedback} />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1106,6 +1472,8 @@ export default function App() {
         <AnimatePresence>
           {showSettings && <SettingsPanel settings={settings} onSave={(patch) => setSettings((s) => ({ ...s, ...patch }))} onClose={() => setShowSettings(false)} />}
           {showLogin && <LoginModal onLogin={(u) => { setAuth({ status: "authenticated", user: u }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
+          {showSavedAdvice && <SavedAdvicePanel records={savedAdvice} folders={box.folders} onClose={() => setShowSavedAdvice(false)} onEmail={emailAnalysis} />}
+          {showBeta && betaStatus && <BetaPanel status={betaStatus} folders={box.folders} onClose={() => setShowBeta(false)} onSubmit={submitFeedback} />}
         </AnimatePresence>
       </div>
     </SettingsCtx.Provider>
