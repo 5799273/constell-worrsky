@@ -452,8 +452,7 @@ function MugCabinet({ folders, notes, selectedFolderId, onSelectFolder, onAnalyz
           })}
         </div>
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${bg.panelBorder}`, textAlign: "center" }}>
-          <button type="button" onClick={onFeedback}
-            style={{ minHeight: 40, padding: "7px 14px", background: "transparent", border: `1px solid ${bg.btnBorder}`, borderRadius: 8, color: bg.textMuted, fontSize: 10.5, cursor: "pointer" }}>
+          <button type="button" className="feedback-entry-button" onClick={onFeedback}>
             의견 보내기
           </button>
         </div>

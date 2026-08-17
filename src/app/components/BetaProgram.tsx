@@ -37,7 +37,7 @@ export function BetaPanel({ status, onClose, onFeedback, bg }: {
 
       <div className="beta-feedback-callout" style={{ borderColor: bg.cardBorder, color: bg.textSecondary }}>
         <p>별별고민은 현재 Beta 운영 중입니다.<br />사용하면서 불편했던 점이나 필요한 점이 있다면 알려주세요.</p>
-        <button type="button" onClick={onFeedback} style={{ background: bg.accentBtn, borderColor: bg.accentBtnBorder, color: bg.accentBtnText }}>의견 보내기</button>
+        <button type="button" className="feedback-entry-button" onClick={onFeedback}>의견 보내기</button>
       </div>
     </section>
   </div>;

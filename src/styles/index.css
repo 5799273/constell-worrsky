@@ -35,7 +35,11 @@ button, textarea, input { font: inherit; }
 .beta-stat-grid span { display: block; overflow-wrap: anywhere; font-size: 11px; }
 .beta-feedback-callout { margin-top: 18px; padding-top: 18px; border-top: 1px solid; text-align: center; }
 .beta-feedback-callout p { margin: 0; font-size: 12px; line-height: 1.7; }
-.beta-feedback-callout button { min-width: 124px; min-height: 44px; margin-top: 14px; padding: 9px 16px; border: 1px solid; border-radius: 9px; cursor: pointer; font-weight: 700; }
+.feedback-entry-button { min-width: 124px; min-height: 44px; padding: 9px 16px; border: 1px solid rgba(112,76,35,.46); border-radius: 9px; background: linear-gradient(180deg,#fffef9 0%,#f7ead2 100%); color: #3d260f; box-shadow: 0 1px 2px rgba(72,43,15,.10); cursor: pointer; font-size: 11px; font-weight: 700; transition: background .18s ease,border-color .18s ease,box-shadow .18s ease,transform .12s ease; }
+.feedback-entry-button:hover { background: linear-gradient(180deg,#fffefa 0%,#f9edd8 100%); border-color: rgba(100,65,27,.54); box-shadow: 0 1px 3px rgba(72,43,15,.12); }
+.feedback-entry-button:active { background: #f2e3c8; box-shadow: 0 1px 2px rgba(72,43,15,.08); transform: translateY(1px); }
+.feedback-entry-button:focus-visible { outline: 2px solid rgba(126,88,42,.62); outline-offset: 3px; }
+.beta-feedback-callout .feedback-entry-button { margin-top: 14px; }
 @media (max-width: 640px) {
   .app-header-actions { position: static !important; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
   .feedback-overlay { align-items: flex-end; padding: 0; }
