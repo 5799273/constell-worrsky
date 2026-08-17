@@ -4,9 +4,9 @@ import type { NoteData, AnalysisType, AnalysisRecord, BoxData, ConcernFolder, Us
 import { analyzeNotes, stripMarkdown } from "./services/ai";
 import { supabase } from "./services/supabase";
 import { createEncryptedNote, deleteEncryptedNotes, loadEncryptedAnalysisHistory, loadEncryptedNotes, updateAnalysisSavedState, updateEncryptedNote } from "./services/encrypted-data";
-import { loadBetaStatus, submitBetaFeedback, type BetaStatus } from "./services/beta";
+import { AdviceRatingModal, ServiceFeedbackModal } from "./components/FeedbackDialogs";
 import { BetaPanel } from "./components/BetaProgram";
-import { AnalysisFeedback } from "./components/AnalysisFeedback";
+import { loadBetaStatus, type BetaStatus } from "./services/beta";
 
 /* ═══════════════════════════════════════════════
    CONSTANTS
@@ -342,12 +342,13 @@ function MugSvg({ cat, selected, noteCount, label }: { cat: string; selected: bo
 /* ═══════════════════════════════════════════════
    MUG CABINET — 고민 찻장
 ═══════════════════════════════════════════════ */
-function MugCabinet({ folders, notes, selectedFolderId, onSelectFolder, onAnalyze, activeType, isLoading }: {
+function MugCabinet({ folders, notes, selectedFolderId, onSelectFolder, onAnalyze, onFeedback, activeType, isLoading }: {
   folders: ConcernFolder[];
   notes: NoteData[];
   selectedFolderId: string | null;
   onSelectFolder: (folderId: string | null) => void;
   onAnalyze: (t: AnalysisType) => void;
+  onFeedback: () => void;
   activeType: AnalysisType | null;
   isLoading: boolean;
 }) {
@@ -449,6 +450,12 @@ function MugCabinet({ folders, notes, selectedFolderId, onSelectFolder, onAnalyz
               </motion.button>
             );
           })}
+        </div>
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${bg.panelBorder}`, textAlign: "center" }}>
+          <button type="button" onClick={onFeedback}
+            style={{ minHeight: 40, padding: "7px 14px", background: "transparent", border: `1px solid ${bg.btnBorder}`, borderRadius: 8, color: bg.textMuted, fontSize: 10.5, cursor: "pointer" }}>
+            의견 보내기
+          </button>
         </div>
         {disabled && (
           <p style={{ margin: "8px 0 0", fontSize: 9.5, color: bg.textMuted, textAlign: "center", fontFamily: "Georgia, serif", fontStyle: "italic" }}>
@@ -861,7 +868,7 @@ function SettingsPanel({ settings, onSave, onClose }: { settings: AppSettings; o
 /* ═══════════════════════════════════════════════
    RESULT PAPER
 ═══════════════════════════════════════════════ */
-function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onSave, onEmail }: { record: AnalysisRecord | null; error: string | null; isLoading: boolean; activeType: AnalysisType | null; selectedFolder: ConcernFolder | null; onSave: (record: AnalysisRecord) => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void }) {
+function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onSave }: { record: AnalysisRecord | null; error: string | null; isLoading: boolean; activeType: AnalysisType | null; selectedFolder: ConcernFolder | null; onSave: (record: AnalysisRecord) => void }) {
   if (!activeType) return null;
   const m = ANALYSIS_META[activeType];
   return (
@@ -892,17 +899,12 @@ function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onS
                 {record.content.split("\n\n").filter(Boolean).map((para, i, arr) => (
                   <p key={i} style={{ margin: 0, marginBottom: i < arr.length - 1 ? 14 : 0, fontSize: 13.5, color: "#2C1B07", fontFamily: "'Noto Serif KR', Georgia, serif", lineHeight: 1.88, textAlign: "justify" }}>{para.replace(/\n/g, " ")}</p>
                 ))}
-                <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 18 }}>
+                <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
                   <button onClick={() => onSave(record)} disabled={record.isSaved}
                     style={{ padding: "7px 14px", background: record.isSaved ? "rgba(120,75,20,0.08)" : "rgba(120,75,20,0.14)", border: "1px solid rgba(120,75,20,0.24)", borderRadius: 8, color: "#5B3512", fontSize: 11, cursor: record.isSaved ? "default" : "pointer" }}>
                     {record.isSaved ? "저장됨" : "저장하기"}
                   </button>
-                  <button onClick={() => onEmail(record, selectedFolder)}
-                    style={{ padding: "7px 14px", background: "rgba(120,75,20,0.10)", border: "1px solid rgba(120,75,20,0.24)", borderRadius: 8, color: "#5B3512", fontSize: 11, cursor: "pointer" }}>
-                    이메일로 전송
-                  </button>
                 </div>
-                <AnalysisFeedback record={record} />
                 <div style={{ marginTop: 18, textAlign: "center" }}>
                   <div style={{ height: 1, background: "linear-gradient(90deg, transparent, rgba(120,75,20,0.24), transparent)", marginBottom: 8 }} />
                   <span style={{ fontSize: 10, color: "rgba(110,65,15,0.36)", fontFamily: "Georgia, serif", letterSpacing: "0.14em" }}>✦ 별별고민 ✦</span>
@@ -916,10 +918,11 @@ function ResultPaper({ record, error, isLoading, activeType, selectedFolder, onS
   );
 }
 
-function SavedAdvicePanel({ records, folders, onClose, onEmail }: { records: AnalysisRecord[]; folders: ConcernFolder[]; onClose: () => void; onEmail: (record: AnalysisRecord, folder: ConcernFolder | null) => void }) {
+function SavedAdvicePanel({ records, folders, onClose }: { records: AnalysisRecord[]; folders: ConcernFolder[]; onClose: () => void }) {
   const bg = useBg();
   const sorted = useMemo(() => [...records].sort((a, b) => b.analyzedAt.localeCompare(a.analyzedAt)), [records]);
   const [selectedId, setSelectedId] = useState<string | null>(sorted[0]?.id ?? null);
+  const [ratingRecord, setRatingRecord] = useState<AnalysisRecord | null>(null);
   const selected = sorted.find((record) => record.id === selectedId) ?? null;
   const folderFor = (record: AnalysisRecord) => folders.find((folder) => folder.id === record.folderId) ?? null;
   const labelFor = (type: AnalysisType) => type === "T" ? "T적 조언" : type === "F" ? "F적 조언" : "패턴 찾기";
@@ -936,7 +939,7 @@ function SavedAdvicePanel({ records, folders, onClose, onEmail }: { records: Ana
         {sorted.length === 0 ? (
           <p style={{ margin: "30px 0", color: bg.textMuted, textAlign: "center", fontSize: 12 }}>저장된 조언이 없습니다.</p>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 0.8fr) minmax(280px, 1.4fr)", gap: 16 }}>
+          <div className="saved-advice-layout">
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {sorted.map((record) => {
                 const folder = folderFor(record);
@@ -955,13 +958,14 @@ function SavedAdvicePanel({ records, folders, onClose, onEmail }: { records: Ana
                 <h3 style={{ margin: "0 0 5px", color: bg.headingColor, fontSize: 14 }}>{folderFor(selected)?.name ?? "알 수 없는 고민"} · {labelFor(selected.type)}</h3>
                 <div style={{ marginBottom: 14, fontSize: 10, color: bg.textMuted }}>{new Date(selected.analyzedAt).toLocaleDateString("ko-KR")}</div>
                 <div style={{ color: bg.textPrimary, fontSize: 12.5, lineHeight: 1.75, whiteSpace: "pre-wrap" }}>{selected.content}</div>
-                <button onClick={() => onEmail(selected, folderFor(selected))}
-                  style={{ marginTop: 16, padding: "7px 13px", background: bg.accentBtn, border: `1px solid ${bg.accentBtnBorder}`, borderRadius: 8, color: bg.accentBtnText, fontSize: 11, cursor: "pointer" }}>이메일로 전송</button>
+                <button onClick={() => setRatingRecord(selected)}
+                  style={{ minHeight: 42, marginTop: 16, padding: "8px 14px", background: bg.btnBg, border: `1px solid ${bg.btnBorder}`, borderRadius: 8, color: bg.textPrimary, fontSize: 11, cursor: "pointer" }}>평가하기</button>
               </div>
             )}
           </div>
         )}
       </motion.div>
+      {ratingRecord && <AdviceRatingModal record={ratingRecord} onClose={() => setRatingRecord(null)} bg={bg} />}
     </motion.div>
   );
 }
@@ -1074,9 +1078,10 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSavedAdvice, setShowSavedAdvice] = useState(false);
+  const [showServiceFeedback, setShowServiceFeedback] = useState(false);
   const [showBeta, setShowBeta] = useState(false);
   const [betaStatus, setBetaStatus] = useState<BetaStatus | null>(null);
-  const [betaUnavailable, setBetaUnavailable] = useState(false);
+  const [betaLoading, setBetaLoading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const loadGenerationRef = useRef(0);
 
@@ -1089,7 +1094,6 @@ export default function App() {
     async function loadUserData(userId: string, email: string | null, accessToken?: string) {
       const generation = ++loadGenerationRef.current;
       setAuth({ status: "authenticated", user: { id: userId, email: email ?? "", displayName: email?.split("@")[0] ?? null } });
-      setBetaUnavailable(false);
 
       const foldersPromise = supabase.from("folders").select("id, name, color_key, created_at").order("created_at", { ascending: true });
       const notesPromise = loadEncryptedNotes(accessToken);
@@ -1139,12 +1143,8 @@ export default function App() {
         setStorageError((previous) => [previous, "저장된 조언은 현재 불러올 수 없습니다."].filter(Boolean).join(" "));
       }
 
-      if (betaSettled.status === "fulfilled") {
-        setBetaStatus(betaSettled.value);
-      } else {
-        setBetaStatus(null);
-        setBetaUnavailable(true);
-      }
+      setBetaStatus(betaSettled.status === "fulfilled" ? betaSettled.value : null);
+
     }
 
     async function syncSession() {
@@ -1154,6 +1154,8 @@ export default function App() {
       else {
         setAuth({ status: "guest" });
         setBox(makeBox());
+        setBetaStatus(null);
+        setShowBeta(false);
       }
       if (active) setAuthLoading(false);
     }
@@ -1168,8 +1170,6 @@ export default function App() {
         setActiveFolderId(null);
         setActiveAnalysis(null);
         setResultFolderId(null);
-        setBetaStatus(null);
-        setBetaUnavailable(false);
       }
     });
 
@@ -1317,29 +1317,26 @@ export default function App() {
     updateBox((prev) => ({ ...prev, analysisHistory: prev.analysisHistory.map((item) => item.id === record.id ? { ...item, isSaved: true } : item) }));
   }
 
-  async function submitFeedback(payload: Record<string, unknown>) {
-    await submitBetaFeedback(payload);
-    setBetaStatus(await loadBetaStatus());
-  }
-
-  function emailAnalysis(record: AnalysisRecord, folder: ConcernFolder | null) {
-    const typeLabel = record.type === "T" ? "T적 조언" : record.type === "F" ? "F적 조언" : "패턴 찾기";
-    const subject = `CONSTELL WORRSKY | ${typeLabel}`;
-    const body = [
-      `폴더 이름: ${folder?.name ?? "알 수 없는 고민"}`,
-      `분석 유형: ${typeLabel}`,
-      `분석 날짜: ${new Date(record.analyzedAt).toLocaleDateString("ko-KR")}`,
-      "",
-      record.content,
-    ].join("\n");
-    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  }
-
   const resultFolder = box.folders.find((folder) => folder.id === resultFolderId) ?? null;
   const latestRecord = activeAnalysis && resultFolderId
     ? [...box.analysisHistory].reverse().find((record) => record.folderId === resultFolderId && record.type === activeAnalysis) ?? null
     : null;
   const savedAdvice = box.analysisHistory.filter((record) => record.isSaved);
+
+  async function openBetaStatus() {
+    if (auth.status !== "authenticated" || betaLoading) return;
+    if (betaStatus) { setShowBeta(true); return; }
+    setBetaLoading(true);
+    try {
+      const status = await loadBetaStatus();
+      setBetaStatus(status);
+      setShowBeta(true);
+    } catch {
+      setStorageError((previous) => [previous, "이용 현황을 불러오지 못했습니다."].filter(Boolean).join(" "));
+    } finally {
+      setBetaLoading(false);
+    }
+  }
 
   const sel = useMemo(() => {
     const folder = box.folders.find((item) => item.id === selectedFolderId);
@@ -1375,11 +1372,14 @@ export default function App() {
             <div style={{ fontSize: 9.5, letterSpacing: "0.38em", color: bg.subtitleColor, textTransform: "uppercase", marginBottom: 5, fontFamily: "Georgia, serif" }}>나의 고민 사이트</div>
             <h1 style={{ margin: 0, fontSize: 30, fontWeight: 700, color: bg.headingColor, letterSpacing: "0.06em", fontFamily: "'Noto Serif KR', Georgia, serif", textShadow: settings.bgTheme === "dark" ? "0 0 30px rgba(210,195,120,0.14)" : "0 2px 12px rgba(40,100,200,0.10)" }}>별별고민</h1>
             <div style={{ marginTop: 10, height: "1px", background: `linear-gradient(90deg, transparent, ${bg.dividerColor}, transparent)` }} />
-            <div style={{ position: "absolute", right: 0, top: 0, display: "flex", alignItems: "center", gap: 8 }}>
+            <div className="app-header-actions" style={{ position: "absolute", right: 0, top: 0, display: "flex", alignItems: "center", gap: 8 }}>
               {auth.status === "authenticated" ? (
                 <>
                   <button onClick={() => setShowSavedAdvice(true)} style={{ padding: "4px 8px", background: bg.btnBg, border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: "pointer", color: bg.textSecondary, fontSize: 10 }}>저장된 조언</button>
-                  <button onClick={() => { if (!betaUnavailable) setShowBeta(true); }} disabled={betaUnavailable} title={betaUnavailable ? "베타 현황을 불러올 수 없습니다." : undefined} style={{ padding: "4px 8px", background: bg.btnBg, border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: betaUnavailable ? "default" : "pointer", opacity: betaUnavailable ? 0.55 : 1, color: bg.textSecondary, fontSize: 10 }}>베타 {betaUnavailable ? "사용 불가" : betaStatus ? `${betaStatus.participant.day}일차` : "현황"}</button>
+                  <button type="button" onClick={() => void openBetaStatus()} disabled={betaLoading}
+                    style={{ minHeight: 30, padding: "4px 8px", background: "transparent", border: `1px solid ${bg.btnBorder}`, borderRadius: 9, color: bg.textSecondary, fontSize: 9.5, cursor: betaLoading ? "default" : "pointer", whiteSpace: "nowrap" }}>
+                    {betaLoading ? "불러오는 중…" : "Beta · 내 이용 현황"}
+                  </button>
                   <span style={{ fontSize: 10.5, color: bg.textSecondary, fontFamily: "Georgia, serif" }}>{auth.user.displayName}</span>
                   <button onClick={handleLogout} style={{ padding: "4px 8px", background: "transparent", border: `1px solid ${bg.btnBorder}`, borderRadius: 10, cursor: "pointer", color: bg.textSecondary, fontSize: 10 }}>로그아웃</button>
                 </>
@@ -1406,6 +1406,7 @@ export default function App() {
                 selectedFolderId={activeFolderId}
                 onSelectFolder={(folderId) => { setActiveFolderId(folderId); setAnalysisError(null); }}
                 onAnalyze={handleAnalyze}
+                onFeedback={() => auth.status === "authenticated" ? setShowServiceFeedback(true) : setShowLogin(true)}
                 activeType={activeAnalysis}
                 isLoading={analysisLoading}
               />
@@ -1464,7 +1465,7 @@ export default function App() {
           <AnimatePresence>
             {activeAnalysis && (
               <motion.div key="result" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} style={{ marginTop: 30 }}>
-                <ResultPaper record={latestRecord} error={analysisError} isLoading={analysisLoading} activeType={activeAnalysis} selectedFolder={resultFolder} onSave={saveAnalysis} onEmail={emailAnalysis} />
+                <ResultPaper record={latestRecord} error={analysisError} isLoading={analysisLoading} activeType={activeAnalysis} selectedFolder={resultFolder} onSave={saveAnalysis} />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1473,8 +1474,9 @@ export default function App() {
         <AnimatePresence>
           {showSettings && <SettingsPanel settings={settings} onSave={(patch) => setSettings((s) => ({ ...s, ...patch }))} onClose={() => setShowSettings(false)} />}
           {showLogin && <LoginModal onLogin={(u) => { setAuth({ status: "authenticated", user: u }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
-          {showSavedAdvice && <SavedAdvicePanel records={savedAdvice} folders={box.folders} onClose={() => setShowSavedAdvice(false)} onEmail={emailAnalysis} />}
-          {showBeta && betaStatus && <BetaPanel status={betaStatus} folders={box.folders} onClose={() => setShowBeta(false)} onSubmit={submitFeedback} />}
+          {showSavedAdvice && <SavedAdvicePanel records={savedAdvice} folders={box.folders} onClose={() => setShowSavedAdvice(false)} />}
+          {showBeta && betaStatus && <BetaPanel status={betaStatus} bg={bg} onClose={() => setShowBeta(false)} onFeedback={() => { setShowBeta(false); setShowServiceFeedback(true); }} />}
+          {showServiceFeedback && <ServiceFeedbackModal onClose={() => setShowServiceFeedback(false)} bg={bg} />}
         </AnimatePresence>
       </div>
     </SettingsCtx.Provider>

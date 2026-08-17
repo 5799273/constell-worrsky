@@ -1,3 +1,50 @@
 @import './fonts.css';
 @import './tailwind.css';
 @import './theme.css';
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; min-width: 0; min-height: 100%; }
+button, textarea, input { font: inherit; }
+.feedback-overlay { position: fixed; inset: 0; z-index: 140; display: flex; align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(8px); }
+.feedback-modal { position: relative; width: 100%; max-width: 500px; max-height: min(88vh, 720px); overflow-y: auto; padding: 26px 24px 22px; border: 1px solid; border-radius: 18px; box-shadow: 0 24px 64px rgba(0,0,0,.4); }
+.feedback-modal h2 { margin: 0 34px 6px 0; font: 700 17px/1.45 'Noto Serif KR', Georgia, serif; }
+.feedback-description { margin: 0 0 20px; font-size: 12px; line-height: 1.65; }
+.feedback-close { position: absolute; right: 14px; top: 12px; width: 44px; height: 44px; border: 0; background: transparent; cursor: pointer; font-size: 22px; }
+.feedback-label { display: block; margin: 16px 0 8px; font-size: 12px; font-weight: 700; }
+.feedback-label span { font-size: 10px; font-weight: 400; opacity: .7; }
+.choice-grid, .reason-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.choice-grid button, .reason-grid button { min-height: 44px; padding: 9px 10px; border: 1px solid; border-radius: 9px; cursor: pointer; font-size: 12px; line-height: 1.4; }
+.rating-row { display: grid; grid-template-columns: repeat(5, minmax(44px, 1fr)); gap: 6px; }
+.rating-row button { min-width: 0; min-height: 44px; border: 1px solid rgba(150,120,70,.25); border-radius: 9px; cursor: pointer; font-weight: 700; }
+.rating-row span { margin-left: 1px; font-size: 10px; font-weight: 400; }
+.feedback-modal textarea { display: block; width: 100%; padding: 11px 12px; border: 1px solid; border-radius: 10px; resize: vertical; line-height: 1.6; }
+.feedback-submit { width: 100%; min-height: 46px; margin-top: 16px; border: 1px solid; border-radius: 10px; cursor: pointer; font-weight: 700; }
+.feedback-submit:disabled { cursor: default; opacity: .5; }
+.feedback-error { margin: 9px 0 0; color: #d45a5a; font-size: 11px; }
+.feedback-success { padding: 42px 8px 18px; text-align: center; font-size: 13px; line-height: 1.7; }
+.feedback-success button { display: block; min-width: 100px; min-height: 44px; margin: 20px auto 0; border: 1px solid; border-radius: 9px; cursor: pointer; }
+.saved-advice-layout { display: grid; grid-template-columns: minmax(220px,.8fr) minmax(280px,1.4fr); gap: 16px; }
+.beta-overlay { position: fixed; inset: 0; z-index: 130; display: flex; align-items: center; justify-content: center; padding: 20px; backdrop-filter: blur(8px); }
+.beta-panel { width: 100%; max-width: 560px; max-height: 88svh; overflow-y: auto; padding: 24px; border: 1px solid; border-radius: 18px; box-shadow: 0 24px 64px rgba(0,0,0,.4); }
+.beta-panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+.beta-panel-header h2 { margin: 3px 0 0; font: 700 19px/1.4 'Noto Serif KR',Georgia,serif; }
+.beta-panel-header button { width: 44px; height: 44px; margin: -9px -9px 0 0; border: 0; background: transparent; cursor: pointer; font-size: 22px; }
+.beta-eyebrow { font-size: 10px; letter-spacing: .14em; }
+.beta-stat-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.beta-stat-grid > div { min-width: 0; padding: 12px 6px; border: 1px solid; border-radius: 10px; text-align: center; }
+.beta-stat-grid strong { display: block; margin-bottom: 3px; font-size: 19px; }
+.beta-stat-grid span { display: block; overflow-wrap: anywhere; font-size: 11px; }
+.beta-feedback-callout { margin-top: 18px; padding-top: 18px; border-top: 1px solid; text-align: center; }
+.beta-feedback-callout p { margin: 0; font-size: 12px; line-height: 1.7; }
+.beta-feedback-callout button { min-width: 124px; min-height: 44px; margin-top: 14px; padding: 9px 16px; border: 1px solid; border-radius: 9px; cursor: pointer; font-weight: 700; }
+@media (max-width: 640px) {
+  .app-header-actions { position: static !important; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+  .feedback-overlay { align-items: flex-end; padding: 0; }
+  .feedback-modal { max-width: none; max-height: 92svh; padding: 24px 16px max(18px, env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; }
+  .choice-grid, .reason-grid { grid-template-columns: 1fr; }
+  .rating-row { gap: 4px; }
+  .rating-row button { min-height: 46px; padding: 0; }
+  .saved-advice-layout { grid-template-columns: minmax(0,1fr); }
+  .beta-overlay { align-items: flex-end; padding: 0; }
+  .beta-panel { max-width: none; max-height: 92svh; padding: 22px 16px max(18px,env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; }
+  .beta-stat-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+}

@@ -4,7 +4,6 @@ import { buildAnalysisInstructions, type AnalysisType } from "./lib/ai-prompt-v1
 import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history.js";
 import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption.js";
 import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
-import { betaSourceSignature } from "./lib/beta-source.js";
 
 type AnalyzeNote = { id: string; text: string; folderId: string; createdAt: string };
 type AnalyzeRequestBody = { folderId?: unknown; type?: unknown; characterPrompt?: unknown; characterName?: unknown };
@@ -153,13 +152,6 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       created_at: createdAt,
     }).select(ANALYSIS_SELECT).single();
     if (error || !data) throw error ?? new Error("Analysis insert failed");
-    await supabase.from("beta_analysis_sources").insert({
-      analysis_id: id,
-      user_id: userId,
-      folder_id: body.folderId,
-      note_ids: notes.map((note) => note.id),
-      source_signature: betaSourceSignature(notes),
-    });
     await supabase.from("beta_analysis_usage").insert({ user_id: userId, analysis_id: id, analysis_type: body.type });
     return res.status(200).json({ ...decryptAnalysis(data, dek), cached: false });
   } catch (error) {
