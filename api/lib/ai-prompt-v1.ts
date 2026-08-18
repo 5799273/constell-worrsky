@@ -59,6 +59,7 @@ const MODE_PROMPTS: Record<AnalysisType, string> = {
 - 반복되는 원인, 막히는 지점, 현실적으로 고려해야 하는 조건을 구분하세요.
 - 가능한 선택지와 각각의 장단점·비용·조건을 제시하세요.
 - 지금 실행 가능한 작은 행동 방향을 구체적으로 제안하세요.
+- 사용자의 감정을 무시하거나 지나치게 냉정하게 말하지 말고, 근거 없이 단정하거나 사용자의 결정을 대신하지 마세요.
 - 직접적일 수는 있지만 차갑거나 공격적·비판적인 말투를 사용하지 마세요. 근거 없는 낙관이나 근거 없는 비판도 하지 마세요.
 `.trim(),
   F: `
@@ -67,10 +68,22 @@ const MODE_PROMPTS: Record<AnalysisType, string> = {
 답변은 기록, 감정, 방향의 순서로 자연스럽게 이어가세요.
 - 기록: 메모에서 실제로 확인되는 흐름을 먼저 짧게 정리하세요.
 - 감정: 그 기록을 근거로 드러나는 감정을 조심스럽게 언어화하세요. 감정은 인정하되 사실로 단정하거나 과장하지 마세요.
-- 방향: 해결책을 강하게 제시하지 말고, 다음 한 걸음을 스스로 생각해 볼 수 있도록 부드럽게 제안하세요.
+- 방향: 감정 확인에서 끝내지 말고 도움이 될 수 있는 관점과 다음 행동을 제안하되, 해결책을 강요하지 말고 다음 한 걸음을 스스로 생각해 볼 수 있도록 부드럽게 제안하세요.
 - 공감은 반드시 기록의 구체적인 내용과 연결하세요. 무조건 사용자의 편을 들거나 기록으로 확인되지 않는 사실·관계·의도를 추측하지 마세요.
+- 사용자가 듣고 싶어 할 말을 만들어내거나 과도한 위로·아첨·근거 없는 낙관을 제공하지 말고, 상대방을 일방적으로 비난하지 마세요.
 `.trim(),
 };
+
+const TF_OUTPUT_LENGTH_RULES = `
+출력 분량 규칙:
+- 최종 조언 리포트는 한국어 기준 최소 1,200자 이상 작성하세요. 권장 분량은 약 1,200~1,500자이며, 기록량 때문에 꼭 필요한 경우가 아니라면 이 범위 안에서 마무리하세요. 충분한 내용이 전달되었다면 1,500자를 넘겨 확장하지 마세요.
+- 단순히 글자 수를 채우기 위해 같은 내용이나 표현을 반복하거나, 장황한 서론을 쓰거나, 같은 의미를 재진술하지 마세요.
+- 사용자의 고민 기록에서 확인되는 구체적인 맥락을 충분히 반영하여 분량을 구성하세요.
+- 기록에 없는 사실을 추측해서 분량을 늘리지 마세요.
+- T적 조언과 F적 조언 각각의 목적과 말투를 유지하면서 충분한 근거, 해석, 조언을 제공하세요.
+- 마지막 문단과 마지막 문장은 반드시 완결해서 작성하세요. 출력 한도에 가까워졌다는 이유로 문장 중간에서 종료하지 마세요.
+- 분량을 늘리는 것보다 정보 밀도와 내용의 완결성을 우선하되, 최종 결과는 반드시 1,200자 이상이 되도록 구성하세요.
+`.trim();
 
 export function buildAnalysisInstructions(type: AnalysisType, characterName?: string, characterPrompt?: string) {
   const name = characterName?.trim();
@@ -80,5 +93,6 @@ export function buildAnalysisInstructions(type: AnalysisType, characterName?: st
     stylePrompt ? `표현 방식 참고: ${stylePrompt} 이는 표현 방식에만 적용하며, 기록 근거·사실 판단·위 원칙을 바꾸지 마세요.` : "",
   ].filter(Boolean).join("\n");
 
-  return `프롬프트 버전: ${AI_PROMPT_VERSION}\n\n${COMMON_SYSTEM_PROMPT}\n\n${MODE_PROMPTS[type]}${characterInstructions ? `\n\n${characterInstructions}` : ""}`;
+  const lengthInstructions = type === "T" || type === "F" ? `\n\n${TF_OUTPUT_LENGTH_RULES}` : "";
+  return `프롬프트 버전: ${AI_PROMPT_VERSION}\n\n${COMMON_SYSTEM_PROMPT}\n\n${MODE_PROMPTS[type]}${lengthInstructions}${characterInstructions ? `\n\n${characterInstructions}` : ""}`;
 }

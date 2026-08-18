@@ -10,6 +10,14 @@ type AnalyzeRequestBody = { folderId?: unknown; type?: unknown; characterPrompt?
 
 const ALLOWED_TYPES = new Set<AnalysisType>(["common", "T", "F"]);
 const DEFAULT_MODEL = "gpt-5.6-luna";
+const MAX_OUTPUT_TOKENS = 3000;
+
+type OpenAIResponsePayload = {
+  status?: unknown;
+  incomplete_details?: { reason?: unknown } | null;
+  output_text?: unknown;
+  output?: unknown;
+};
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
@@ -122,12 +130,20 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         store: false,
         instructions: buildAnalysisInstructions(body.type as AnalysisType, characterName, characterPrompt),
         input: createInput(body.folderId, body.type as AnalysisType, notes),
-        max_output_tokens: 1200,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
         text: { verbosity: "medium" },
       }),
     });
     if (!response.ok) return res.status(502).json({ error: "AI 분석을 지금 완료하지 못했습니다. 잠시 후 다시 시도해주세요." });
-    const outputText = extractOutputText(await response.json());
+    const result = await response.json() as OpenAIResponsePayload;
+    if (result.status !== "completed") {
+      const reason = result.incomplete_details?.reason;
+      const message = result.status === "incomplete" && (reason === "max_tokens" || reason === "max_output_tokens")
+        ? "AI 조언이 출력 한도에 도달해 완성되지 않았습니다. 다시 시도해주세요."
+        : "AI 조언이 완성되지 않았습니다. 잠시 후 다시 시도해주세요.";
+      return res.status(502).json({ error: message });
+    }
+    const outputText = extractOutputText(result);
     if (!outputText) return res.status(502).json({ error: "AI 분석 결과를 받지 못했습니다. 다시 시도해주세요." });
 
     const content = stripMarkdown(outputText);

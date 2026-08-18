@@ -1,1 +1,1 @@
-export const AI_PROMPT_VERSION = "v1.2";
+export const AI_PROMPT_VERSION = "v1.4";

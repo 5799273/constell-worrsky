@@ -59,9 +59,21 @@ interface AppSettings {
   characterName: string;
 }
 type ViewSettings = AppSettings & { folders: ConcernFolder[] };
+const BG_THEME_STORAGE_KEY = "constell-worrsky:bg-theme";
+
+function loadBackgroundTheme(): BackgroundTheme {
+  if (typeof window === "undefined") return "sky";
+  try {
+    const storedTheme = window.localStorage.getItem(BG_THEME_STORAGE_KEY);
+    return storedTheme === "dark" || storedTheme === "sky" ? storedTheme : "sky";
+  } catch {
+    return "sky";
+  }
+}
+
 const SettingsCtx = createContext<ViewSettings>({
   colorTheme: "pastel",
-  bgTheme: "dark",
+  bgTheme: "sky",
   folders: [],
   characterPrompt: "",
   characterName: "",
@@ -1061,10 +1073,10 @@ export default function App() {
   const [auth, setAuth] = useState<AuthState>({ status: "guest" });
   const [authLoading, setAuthLoading] = useState(true);
   const [storageError, setStorageError] = useState<string | null>(null);
-  const [settings, setSettings] = useState<AppSettings>({
-    colorTheme: "pastel", bgTheme: "dark",
+  const [settings, setSettings] = useState<AppSettings>(() => ({
+    colorTheme: "pastel", bgTheme: loadBackgroundTheme(),
     characterPrompt: "", characterName: "",
-  });
+  }));
   const [selectedFolderId, setSelectedFolderId] = useState(() => box.folders[0]?.id ?? "");
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const [text, setText] = useState("");
@@ -1189,6 +1201,15 @@ export default function App() {
       const next = fn(previous);
       return { ...next, notes: sortNotesByDisplayOrder(next.notes), updatedAt: nowISO() };
     });
+  }
+
+  function saveSettings(patch: Partial<AppSettings>) {
+    try {
+      if (patch.bgTheme) window.localStorage.setItem(BG_THEME_STORAGE_KEY, patch.bgTheme);
+    } catch {
+      // Keep the selected theme for this session when browser storage is unavailable.
+    }
+    setSettings((previous) => ({ ...previous, ...patch }));
   }
 
   function requireAuthenticatedUser() {
@@ -1471,7 +1492,7 @@ export default function App() {
         </div>
 
         <AnimatePresence>
-          {showSettings && <SettingsPanel settings={settings} onSave={(patch) => setSettings((s) => ({ ...s, ...patch }))} onClose={() => setShowSettings(false)} />}
+          {showSettings && <SettingsPanel settings={settings} onSave={saveSettings} onClose={() => setShowSettings(false)} />}
           {showLogin && <LoginModal onLogin={(u) => { setAuth({ status: "authenticated", user: u }); setShowLogin(false); }} onClose={() => setShowLogin(false)} />}
           {showSavedAdvice && <SavedAdvicePanel records={savedAdvice} folders={box.folders} onClose={() => setShowSavedAdvice(false)} />}
           {showBeta && betaStatus && <BetaPanel status={betaStatus} bg={bg} onClose={() => setShowBeta(false)} onFeedback={() => { setShowBeta(false); setShowServiceFeedback(true); }} />}
