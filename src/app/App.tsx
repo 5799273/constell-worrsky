@@ -1168,7 +1168,9 @@ export default function App() {
       if (session?.user) await loadUserData(session.user.id, session.user.email ?? null, session.access_token);
       else {
         setAuth({ status: "guest" });
-        setBox(makeBox());
+        const guestBox = makeBox();
+        setBox(guestBox);
+        setSelectedFolderId(guestBox.folders[0]?.id ?? "");
         setBetaStatus(null);
         setShowBeta(false);
       }
@@ -1180,8 +1182,9 @@ export default function App() {
       if (session?.user) void loadUserData(session.user.id, session.user.email ?? null, session.access_token);
       else if (active) {
         setAuth({ status: "guest" });
-        setBox(makeBox());
-        setSelectedFolderId("");
+        const guestBox = makeBox();
+        setBox(guestBox);
+        setSelectedFolderId(guestBox.folders[0]?.id ?? "");
         setActiveFolderId(null);
         setActiveAnalysis(null);
         setResultFolderId(null);
@@ -1225,16 +1228,18 @@ export default function App() {
 
   async function addNote() {
     if (!text.trim()) { setShakeInput(true); setTimeout(() => setShakeInput(false), 440); textareaRef.current?.focus(); return; }
-    const user = requireAuthenticatedUser();
-    if (!user) return;
     const folderId = box.folders.some((folder) => folder.id === selectedFolderId) ? selectedFolderId : box.folders[0]?.id;
     if (!folderId) return;
     const pos = pilePos(currentNotes.length);
     const now = nowISO();
-    try {
-      const { note: data } = await createEncryptedNote(folderId, text.trim(), now);
-      updateBox((prev) => ({ ...prev, notes: [...prev.notes, { id: data.id, text: data.text, folderId: data.folder_id, createdAt: data.created_at, updatedAt: data.updated_at, x: pos.x, y: pos.y, rot: pos.rot }] }));
-    } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 저장하지 못했습니다."); return; }
+    if (auth.status === "guest") {
+      updateBox((prev) => ({ ...prev, notes: [...prev.notes, { id: `guest_${uid()}`, text: text.trim(), folderId, createdAt: now, updatedAt: now, x: pos.x, y: pos.y, rot: pos.rot }] }));
+    } else {
+      try {
+        const { note: data } = await createEncryptedNote(folderId, text.trim(), now);
+        updateBox((prev) => ({ ...prev, notes: [...prev.notes, { id: data.id, text: data.text, folderId: data.folder_id, createdAt: data.created_at, updatedAt: data.updated_at, x: pos.x, y: pos.y, rot: pos.rot }] }));
+      } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 저장하지 못했습니다."); return; }
+    }
     setStorageError(null);
     setText(""); textareaRef.current?.focus();
   }
@@ -1247,26 +1252,32 @@ export default function App() {
   }, [currentNotes.length, ym]);
 
   async function deleteNote(id: string) {
-    if (!requireAuthenticatedUser()) return;
-    try { await deleteEncryptedNotes([id]); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    if (auth.status === "authenticated") {
+      try { await deleteEncryptedNotes([id]); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    }
     updateBox((prev) => ({ ...prev, notes: prev.notes.filter((n) => n.id !== id) }));
     setStorageError(null);
   }
 
   async function deleteAllNotes() {
-    if (!requireAuthenticatedUser() || box.notes.length === 0) return;
-    const ids = box.notes.map((note) => note.id);
-    try { await deleteEncryptedNotes(ids); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    if (box.notes.length === 0) return;
+    if (auth.status === "authenticated") {
+      const ids = box.notes.map((note) => note.id);
+      try { await deleteEncryptedNotes(ids); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모를 삭제하지 못했습니다."); return; }
+    }
     updateBox((prev) => ({ ...prev, notes: [] }));
     setStorageError(null);
   }
 
   async function updateNoteDate(id: string, dateValue: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return;
-    if (!requireAuthenticatedUser()) return;
     const existing = box.notes.find((note) => note.id === id);
     if (!existing) return;
     const createdAt = replaceDateKeepingTime(existing.createdAt, dateValue);
+    if (auth.status === "guest") {
+      updateBox((prev) => ({ ...prev, notes: prev.notes.map((note) => note.id === id ? { ...note, createdAt, updatedAt: nowISO() } : note) }));
+      return;
+    }
     let data;
     try { ({ note: data } = await updateEncryptedNote(id, { createdAt })); } catch (error) { setStorageError(error instanceof Error ? error.message : "메모 날짜를 수정하지 못했습니다."); return; }
     updateBox((prev) => ({ ...prev, notes: prev.notes.map((note) => note.id === id ? { ...note, createdAt: data.created_at, updatedAt: data.updated_at } : note) }));
@@ -1303,7 +1314,7 @@ export default function App() {
   }
 
   async function handleAnalyze(type: AnalysisType) {
-    if (!activeFolderId || auth.status !== "authenticated") return;
+    if (!activeFolderId) return;
     const notesToAnalyze = box.notes
       .filter((note) => note.folderId === activeFolderId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -1313,6 +1324,7 @@ export default function App() {
       const res = await analyzeNotes({
         folderId: activeFolderId,
         type,
+        notes: auth.status === "guest" ? notesToAnalyze.map(({ id, text, folderId, createdAt }) => ({ id, text, folderId, createdAt })) : undefined,
         characterPrompt: settings.characterPrompt || undefined,
         characterName: settings.characterName || undefined,
       });
@@ -1336,7 +1348,12 @@ export default function App() {
   }
 
   async function saveAnalysis(record: AnalysisRecord) {
-    if (record.isSaved || auth.status !== "authenticated") return;
+    if (record.isSaved) return;
+    if (auth.status !== "authenticated") {
+      setStorageError("조언을 저장하려면 로그인해주세요. 지금 만든 결과는 현재 화면에서 계속 볼 수 있어요.");
+      setShowLogin(true);
+      return;
+    }
     try { await updateAnalysisSavedState(record.id, true); } catch { setAnalysisError("조언을 저장하지 못했습니다. 잠시 후 다시 시도해주세요."); return; }
     updateBox((prev) => ({ ...prev, analysisHistory: prev.analysisHistory.map((item) => item.id === record.id ? { ...item, isSaved: true } : item) }));
   }

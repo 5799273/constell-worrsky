@@ -40,6 +40,12 @@ export async function requireUser(req: ApiRequest): Promise<{ userId: string; su
   return { userId: data.user.id, supabase };
 }
 
+export async function optionalUser(req: ApiRequest): Promise<{ userId: string; supabase: SupabaseClient } | null> {
+  const token = bearerToken(req);
+  if (!token) return null;
+  return requireUser(req);
+}
+
 export function handleApiError(error: unknown, res: ApiResponse, fallback: string) {
   if (error instanceof Error && error.message === "UNAUTHORIZED") {
     return res.status(401).json({ error: "로그인이 필요합니다." });

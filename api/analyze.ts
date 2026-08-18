@@ -3,10 +3,10 @@ import { AI_PROMPT_VERSION } from "../src/app/services/ai-config.js";
 import { buildAnalysisInstructions, type AnalysisType } from "./lib/ai-prompt-v1.js";
 import { ANALYSIS_SELECT, decryptAnalysis } from "./analysis-history.js";
 import { activeEncryptionKeyVersion, decryptText, encryptText, fieldAad, getOrCreateUserDek } from "./lib/encryption.js";
-import { handleApiError, requireUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
+import { handleApiError, optionalUser, type ApiRequest, type ApiResponse } from "./lib/supabase-auth.js";
 
 type AnalyzeNote = { id: string; text: string; folderId: string; createdAt: string };
-type AnalyzeRequestBody = { folderId?: unknown; type?: unknown; characterPrompt?: unknown; characterName?: unknown };
+type AnalyzeRequestBody = { folderId?: unknown; type?: unknown; notes?: unknown; characterPrompt?: unknown; characterName?: unknown };
 
 const ALLOWED_TYPES = new Set<AnalysisType>(["common", "T", "F"]);
 const DEFAULT_MODEL = "gpt-5.6-luna";
@@ -25,6 +25,22 @@ function isString(value: unknown): value is string {
 
 function optionalText(value: unknown, maxLength: number): string | undefined {
   return isString(value) && value.trim() ? value.trim().slice(0, maxLength) : undefined;
+}
+
+function guestNotes(value: unknown, folderId: string): AnalyzeNote[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) return null;
+  let totalLength = 0;
+  const notes: AnalyzeNote[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null;
+    const note = item as Record<string, unknown>;
+    if (!isString(note.id) || !isString(note.text) || !note.text.trim() || note.folderId !== folderId || !isString(note.createdAt) || Number.isNaN(Date.parse(note.createdAt))) return null;
+    const text = note.text.trim();
+    totalLength += text.length;
+    if (text.length > 20_000 || totalLength > 100_000) return null;
+    notes.push({ id: note.id.slice(0, 200), text, folderId, createdAt: new Date(note.createdAt).toISOString() });
+  }
+  return notes.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 function createInput(folderId: string, type: AnalysisType, notes: AnalyzeNote[]) {
@@ -85,39 +101,48 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   try {
     const body = (req.body ?? {}) as AnalyzeRequestBody;
     if (!isString(body.folderId) || !ALLOWED_TYPES.has(body.type as AnalysisType)) return res.status(400).json({ error: "잘못된 분석 요청입니다." });
-    const { userId, supabase } = await requireUser(req);
-    const dek = await getOrCreateUserDek(supabase, userId);
-
-    const { data: noteRows, error: notesError } = await supabase.from("notes")
-      .select("id, user_id, folder_id, text_ciphertext, text_nonce, text_auth_tag, encryption_key_version, created_at")
-      .eq("folder_id", body.folderId)
-      .order("created_at", { ascending: true });
-    if (notesError) throw notesError;
-    const notes: AnalyzeNote[] = (noteRows ?? []).map((row) => {
-      const encrypted = row.text_ciphertext && row.text_nonce && row.text_auth_tag && row.encryption_key_version
-        ? { ciphertext: row.text_ciphertext, nonce: row.text_nonce, authTag: row.text_auth_tag, keyVersion: row.encryption_key_version }
-        : null;
-      if (!encrypted) throw new Error("Encrypted note is incomplete");
-      const text = decryptText(encrypted, dek, fieldAad(userId, "notes", row.id, "text", encrypted.keyVersion));
-      return { id: row.id, text, folderId: row.folder_id, createdAt: row.created_at };
-    });
+    const authenticated = await optionalUser(req);
+    let dek: Buffer | null = null;
+    let notes: AnalyzeNote[];
+    if (authenticated) {
+      dek = await getOrCreateUserDek(authenticated.supabase, authenticated.userId);
+      const { data: noteRows, error: notesError } = await authenticated.supabase.from("notes")
+        .select("id, user_id, folder_id, text_ciphertext, text_nonce, text_auth_tag, encryption_key_version, created_at")
+        .eq("folder_id", body.folderId)
+        .order("created_at", { ascending: true });
+      if (notesError) throw notesError;
+      notes = (noteRows ?? []).map((row) => {
+        const encrypted = row.text_ciphertext && row.text_nonce && row.text_auth_tag && row.encryption_key_version
+          ? { ciphertext: row.text_ciphertext, nonce: row.text_nonce, authTag: row.text_auth_tag, keyVersion: row.encryption_key_version }
+          : null;
+        if (!encrypted || !dek) throw new Error("Encrypted note is incomplete");
+        const text = decryptText(encrypted, dek, fieldAad(authenticated.userId, "notes", row.id, "text", encrypted.keyVersion));
+        return { id: row.id, text, folderId: row.folder_id, createdAt: row.created_at };
+      });
+    } else {
+      const suppliedNotes = guestNotes(body.notes, body.folderId);
+      if (!suppliedNotes) return res.status(400).json({ error: "분석할 고민 메모를 확인해주세요." });
+      notes = suppliedNotes;
+    }
     if (notes.length === 0) return res.status(400).json({ error: "선택한 고민 폴더의 메모를 확인할 수 없습니다." });
 
     const characterName = optionalText(body.characterName, 80);
     const characterPrompt = optionalText(body.characterPrompt, 1000);
     const notesSignature = analysisSignature(notes, characterName ?? "", characterPrompt ?? "");
-    const { data: cachedRows, error: cacheError } = await supabase.from("analysis_history")
-      .select(ANALYSIS_SELECT)
-      .eq("folder_id", body.folderId)
-      .eq("type", body.type)
-      .eq("notes_signature", notesSignature)
-      .eq("prompt_version", AI_PROMPT_VERSION)
-      .order("created_at", { ascending: false })
-      .limit(1);
-    if (cacheError) throw cacheError;
-    if (cachedRows?.[0]) {
-      await supabase.from("beta_analysis_usage").insert({ user_id: userId, analysis_id: cachedRows[0].id, analysis_type: body.type });
-      return res.status(200).json({ ...decryptAnalysis(cachedRows[0], dek), cached: true });
+    if (authenticated && dek) {
+      const { data: cachedRows, error: cacheError } = await authenticated.supabase.from("analysis_history")
+        .select(ANALYSIS_SELECT)
+        .eq("folder_id", body.folderId)
+        .eq("type", body.type)
+        .eq("notes_signature", notesSignature)
+        .eq("prompt_version", AI_PROMPT_VERSION)
+        .order("created_at", { ascending: false })
+        .limit(1);
+      if (cacheError) throw cacheError;
+      if (cachedRows?.[0]) {
+        await authenticated.supabase.from("beta_analysis_usage").insert({ user_id: authenticated.userId, analysis_id: cachedRows[0].id, analysis_type: body.type });
+        return res.status(200).json({ ...decryptAnalysis(cachedRows[0], dek), cached: true });
+      }
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -148,12 +173,19 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     const content = stripMarkdown(outputText);
     const id = randomUUID();
-    const keyVersion = activeEncryptionKeyVersion();
-    const encrypted = encryptText(content, dek, fieldAad(userId, "analysis_history", id, "content", keyVersion), keyVersion);
     const createdAt = new Date().toISOString();
-    const { data, error } = await supabase.from("analysis_history").insert({
+    if (!authenticated || !dek) {
+      return res.status(200).json({
+        id, folder_id: body.folderId, type: body.type, content, created_at: createdAt,
+        note_count: notes.length, notes_signature: notesSignature, prompt_version: AI_PROMPT_VERSION,
+        is_saved: false, character_name: characterName ?? null, cached: false,
+      });
+    }
+    const keyVersion = activeEncryptionKeyVersion();
+    const encrypted = encryptText(content, dek, fieldAad(authenticated.userId, "analysis_history", id, "content", keyVersion), keyVersion);
+    const { data, error } = await authenticated.supabase.from("analysis_history").insert({
       id,
-      user_id: userId,
+      user_id: authenticated.userId,
       folder_id: body.folderId,
       type: body.type,
       content_ciphertext: encrypted.ciphertext,
@@ -168,7 +200,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       created_at: createdAt,
     }).select(ANALYSIS_SELECT).single();
     if (error || !data) throw error ?? new Error("Analysis insert failed");
-    await supabase.from("beta_analysis_usage").insert({ user_id: userId, analysis_id: id, analysis_type: body.type });
+    await authenticated.supabase.from("beta_analysis_usage").insert({ user_id: authenticated.userId, analysis_id: id, analysis_type: body.type });
     return res.status(200).json({ ...decryptAnalysis(data, dek), cached: false });
   } catch (error) {
     return handleApiError(error, res, "AI 분석 서버에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.");
