@@ -999,7 +999,11 @@ function LoginModal({ onLogin, onClose }: { onLogin: (u: UserSession) => void; o
     setIsSubmitting(true);
     try {
       if (mode === "signUp") {
-        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { emailRedirectTo: `${window.location.origin}/` },
+        });
         if (error) throw error;
         if (data.session && data.user) onLogin({ id: data.user.id, email: data.user.email ?? email.trim(), displayName: data.user.email?.split("@")[0] ?? null });
         setDone(true);
